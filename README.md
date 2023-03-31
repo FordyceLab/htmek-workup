@@ -17,7 +17,7 @@ To use the package, open a Jupyter notebook and run the following command:
 
     from experiment_processing import processing
 
-This will import the `processing` module. The module contains a class called `Processing` that can be used to create an interactive interface for processing HT-MEK data. The `Processing` class has methods for processing and plotting PDF summaries of HT-MEK data and exporting tabular data to a CSV file.
+This will import the `processing` module. The `processing` module has methods to filter low-quality measurements, plot PDF summaries of HT-MEK data, and export tabular data to a CSV file.
 
 
 License
