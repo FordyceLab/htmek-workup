@@ -1,0 +1,11 @@
+ipywidgets==7.7.0
+matplotlib==3.3.4
+numpy==1.20.2
+pandarallel==1.6.1
+pandas==1.2.4
+Pillow==9.4.0
+PyPDF2==3.0.1
+scipy==1.7.3
+seaborn==0.12.2
+sympy==1.11.1
+tqdm==4.59.0

@@ -1,3 +1,9 @@
+# Author: Micah Olivas
+# Date: 2023-3-31
+# Description: This script contains functions for processing the data from the image processing script. It is designed to be imported into the analysis notebook.
+
+
+
 # Standard imports
 import pandas as pd
 import seaborn as sns
@@ -35,6 +41,8 @@ import os
 import PyPDF2
 from tqdm import tqdm
 from time import sleep
+from os import listdir
+from os.path import isfile, join
 
 
 
