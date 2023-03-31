@@ -1090,8 +1090,8 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
     with tqdm(total = device_columns * device_rows) as pbar:
 
         # Plot Chamber-wise Summaries
-        for x in range(1, 33):
-            for y in range(1, 57, 1):
+        for x in range(1, device_columns + 1, 1):
+            for y in range(1, device_rows + 1, 1):
                 
                 ## initialize data df ============================================================
                 export_kinetic_df = sq_merged[sq_merged['Indices'] == f"{x:02d}" + ',' + f"{y:02d}"]
@@ -1103,15 +1103,23 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                 fig = plt.figure(figsize=(10, 10)) # size of print area of A4 page is 7 by 9.5
 
                 # increase the spacing between the subplots
-                fig.subplots_adjust(wspace=0.3, hspace=0.7)
+                fig.subplots_adjust(wspace=0.5, hspace=0.7)
+
 
                 ## defining subplots ============================================================
-                ax_image = plt.subplot2grid((5, 5), (0, 0), colspan=1) # chamber image
-                ax_first_progress_curve = plt.subplot2grid((5, 6), (1, 1), colspan=1) # progress curves
-                ax_second_progress_curve = plt.subplot2grid((5, 6), (1, 2), colspan=1, sharey=ax_first_progress_curve) # progress curves
-                ax_third_progress_curve = plt.subplot2grid((5, 6), (1, 3), colspan=1, sharey=ax_first_progress_curve) # progress curves
-                ax_fourth_progress_curve = plt.subplot2grid((5, 6), (1, 4), colspan=1, sharey=ax_first_progress_curve) # progress curves
-                ax_fifth_progress_curve = plt.subplot2grid((5, 6), (1, 5), colspan=1, sharey=ax_first_progress_curve) # progress curves
+                ax_image = plt.subplot2grid((6, 10), (0, 0), colspan=2) # chamber image
+                
+                # define concentration series
+                concs = set(export_kinetic_df['substrate_conc_uM'])
+
+                # initialize progress curve subplot2grid objects
+                for n, conc in enumerate(sorted(concs)):
+                    if n == 0:
+                        globals()['ax_progress_curve_' + str(n)] = plt.subplot2grid((6, len(concs)), (1, n), colspan=1, rowspan=2) # progress curves
+                    else:
+                        globals()['ax_progress_curve_' + str(n)] = plt.subplot2grid((6, len(concs)), (1, n), colspan=1, rowspan=2, sharey=ax_progress_curve_0) # progress curves
+            
+                # define table, mm curve, and pbp std curve subplot2grid objects
                 ax_table = plt.subplot2grid((5, 6), (0, 1), colspan=5) # table
                 ax_mm_curve = plt.subplot2grid((5, 6), (3, 0), rowspan=2, colspan=2) # chamber image
                 ax_pbp_std_curve = plt.subplot2grid((5, 6), (3, 4), rowspan=2, colspan=2) # chamber image
@@ -1163,7 +1171,6 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
 
 
                 ## progress curve plotting ============================================================
-                concs = set(export_kinetic_df['substrate_conc_uM'])
                 
                 # find local background indices and store data in new df
                 local_background_indices = get_local_bg_indices(x=x, y=y, device_rows=device_rows) # stores indices of local background chambers in a list
@@ -1173,20 +1180,32 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                     local_background_df = local_background_df.append(data)
 
                 # plot curves
-                plot_progress_curve(export_kinetic_df, 10, ax_first_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                plot_progress_curve(local_background_df, 10, ax_first_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
+                for ax, conc in enumerate(sorted(concs)):
+                    plot_progress_curve(export_kinetic_df, conc=conc, ax=globals()['ax_progress_curve_' + str(ax)] , fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
+                    plot_progress_curve(local_background_df, conc=conc, ax=globals()['ax_progress_curve_' + str(ax)], kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
 
-                plot_progress_curve(export_kinetic_df, 25, ax_second_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                plot_progress_curve(local_background_df, 25, ax_second_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
+                    # set ylabel on first (left-most) plot
+                    if ax == 0:
+                        globals()['ax_progress_curve_' + str(ax)].set_ylabel('Intensity')
+                    else:
+                        # globals()['ax_progress_curve_' + str(ax)].set_yticks([])
+                        plt.setp(globals()['ax_progress_curve_' + str(ax)].get_yticklabels(), visible=False)
 
-                plot_progress_curve(export_kinetic_df, 50, ax_third_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                plot_progress_curve(local_background_df, 50, ax_third_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
 
-                plot_progress_curve(export_kinetic_df, 75, ax_fourth_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                plot_progress_curve(local_background_df, 75, ax_fourth_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
+                # plot_progress_curve(export_kinetic_df, 10, ax_first_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
+                # plot_progress_curve(local_background_df, 10, ax_first_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
+
+                # plot_progress_curve(export_kinetic_df, 25, ax_second_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
+                # plot_progress_curve(local_background_df, 25, ax_second_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
+
+                # plot_progress_curve(export_kinetic_df, 50, ax_third_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
+                # plot_progress_curve(local_background_df, 50, ax_third_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
+
+                # plot_progress_curve(export_kinetic_df, 75, ax_fourth_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
+                # plot_progress_curve(local_background_df, 75, ax_fourth_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
                 
-                plot_progress_curve(export_kinetic_df, 100, ax_fifth_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                plot_progress_curve(local_background_df, 100, ax_fifth_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
+                # plot_progress_curve(export_kinetic_df, 100, ax_fifth_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
+                # plot_progress_curve(local_background_df, 100, ax_fifth_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
 
 
                 ## table plotting ============================================================
@@ -1249,13 +1268,19 @@ def merge_pdfs(export_path_root):
 # ====================================================================================================
 
 # export data to csv
-def export_data(sq_merged, squeeze_mm, export_df, export_path_root, experimental_day, setup, device, substrate, experiment_name):
-    """ Export data to csv.
+def export_data(sq_merged, squeeze_mm, export_path_root, experimental_day, setup, device, substrate, experiment_name):
+    """ Format and export data to csv. 
+    Description
+    -----------
+    Adds additional columns with information about the experiment. Exports to csv.
 
     Parameters
     ----------
-    export_df : pandas.DataFrame
-        Dataframe containing all data to be exported.
+    sq_merged : pandas.DataFrame
+        Dataframe containing all data from the squeeze analysis.
+
+    squeeze_mm : pandas.DataFrame
+        Dataframe containing all data from Michaelis-Menten analysis.
 
     export_path_root : str
         Path to export directory.
@@ -1264,7 +1289,7 @@ def export_data(sq_merged, squeeze_mm, export_df, export_path_root, experimental
         Experimental day.
 
     setup : str
-        Microscopy setup.
+        Microscopy setup numer.
 
     device : str
         Device number corresponding to the manifold used on the microscopy setup.
@@ -1280,10 +1305,11 @@ def export_data(sq_merged, squeeze_mm, export_df, export_path_root, experimental
     None
 
     """
-    # define export df
+
+    # generate export dataframe
     export_df = pd.merge(squeeze_mm, sq_merged, on=list(np.intersect1d(sq_merged.columns, squeeze_mm.columns)))
 
-    # add remaining data
+    # add additional columns to export dataframe
     export_df['GlobalExperimentIndex'] = '_'.join([experimental_day, setup, device, substrate])
     export_df['Experiment'] = experiment_name
 
