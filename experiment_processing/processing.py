@@ -8,6 +8,7 @@
 import pandas as pd
 import seaborn as sns
 import numpy as np
+import re
 
 # plotting
 import matplotlib 
@@ -423,11 +424,32 @@ def manual_culling(sq_merged, egfp_button_summary_image_path, NUM_ROWS, NUM_COLS
         culling_export_filepath_split = culling_export_filepath.split('/')
         culling_filepath_abbrev = '.../' + '/'.join(culling_export_filepath_split[-4:])
 
-        # Create button grid with value of None to prevent the function from returning a button grid
-        button_grid = None
-
         # Print
         print('Culling record found: %s. \nLoaded culling record.' % culling_filepath_abbrev)
+
+        # get expression values from all chambers
+        all_chambers_expression = sq_merged[[ "Indices", 'MutantID', 'EnzymeConc']].drop_duplicates(subset=['Indices'], keep='first')
+
+        # get Indices from all chambers
+        concs_Indices = all_chambers_expression.loc[all_chambers_expression.EnzymeConc > 0][['EnzymeConc','Indices']].sort_values('EnzymeConc', ascending = False).to_numpy().tolist()
+        Indices_to_visualize = [(enzyme_conc, tuple([int(i) for i in i.split(',')])) for enzyme_conc, i in concs_Indices]
+
+        # create button array
+        button_img_arr = np.asarray(Image.open(egfp_button_summary_image_path))
+        height, width = button_img_arr.shape
+
+        # define stamp dimensions
+        stamp_height = int(height/NUM_ROWS)
+        stamp_width = int(width/NUM_COLS)
+
+        # create button stamps
+        button_stamps = {}
+        for row in range(NUM_ROWS):
+            for col in range(NUM_COLS):
+                button_stamps[(col+1, row+1)] = button_img_arr[row*stamp_height:row*stamp_height+stamp_height, col*stamp_width:col*stamp_width+stamp_width]
+
+        # create button grid
+        button_grid = None
 
     # If culling record does not exist, create a new one
     elif culling_record_exists == False:
@@ -1188,3 +1210,82 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                 plt.close('all')
 
         pbar.set_description("Export complete")
+
+
+# merge all pdfs into one
+def merge_pdfs(export_path_root):
+
+    # set path
+    mypath = export_path_root + '/PDF/'
+
+    # store all pdf files in a list
+    all_files = sorted([mypath + 'pages/' + f for f in listdir(mypath + 'pages/') if isfile(join(mypath + 'pages/', f))])
+
+    # remove files from all_files that are not pdfs containing two indices in the filename
+    for file in all_files:
+        if not file.endswith('.pdf'):
+            all_files.remove(file)
+        elif not re.search(r'\d{2},\d{2}', file):
+            all_files.remove(file)
+
+    # initialize merger
+    merger = PyPDF2.PdfFileMerger()
+
+    # merge pdfs with tqdm progress bar
+    for pdf in tqdm(all_files, desc='Merging PDFs'):
+        merger.append(pdf)
+
+    # write merged pdf to file
+    print('Writing merged pdf to file...')
+    merger.write(mypath + 'merged.pdf')
+    print('Done.')
+
+    # close merger
+    merger.close()
+
+
+# ====================================================================================================
+# EXPORT DATA TO CSV
+# ====================================================================================================
+
+# export data to csv
+def export_data(sq_merged, squeeze_mm, export_df, export_path_root, experimental_day, setup, device, substrate, experiment_name):
+    """ Export data to csv.
+
+    Parameters
+    ----------
+    export_df : pandas.DataFrame
+        Dataframe containing all data to be exported.
+
+    export_path_root : str
+        Path to export directory.
+
+    experimental_day : str
+        Experimental day.
+
+    setup : str
+        Microscopy setup.
+
+    device : str
+        Device number corresponding to the manifold used on the microscopy setup.
+
+    substrate : str
+        Substrate used in the experiment.
+
+    experiment_name : str
+        Description of the experiment.
+
+    Returns
+    -------
+    None
+
+    """
+    # define export df
+    export_df = pd.merge(squeeze_mm, sq_merged, on=list(np.intersect1d(sq_merged.columns, squeeze_mm.columns)))
+
+    # add remaining data
+    export_df['GlobalExperimentIndex'] = '_'.join([experimental_day, setup, device, substrate])
+    export_df['Experiment'] = experiment_name
+
+    # export to csv
+    export_df.to_csv(export_path_root + '/' + experimental_day + '_' + substrate + '_workup.csv')
