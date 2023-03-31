@@ -1155,19 +1155,31 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                 KM_fit = export_mm_df.iloc[0].KM_fit
                 vmax_fit = export_mm_df.iloc[0].vmax_fit
 
-                # plot
+                # plot points
                 t = np.arange(0, 100, 0.2)
                 fit_ydata = v_mm_func(t, *[KM_fit, vmax_fit])
-                ax_mm_curve.plot(t, fit_ydata, 'g--', label='Fit') 
                 ax_mm_curve.plot(xdata, ydata, 'bo', label='data')
                 ax_mm_curve.axhline(vmax_fit, label='$v_{max}$')
-                # ax_mm_curve.axvline(KM_fit, ymin=0, ymax=(vmax_fit/.2))
+
+                # calculate R2 value with np function
+                r2 = np.corrcoef(xdata, ydata)[0, 1]**2
+                
+                # plot michaelis-menten curve fit
+                ax_mm_curve.plot(t, fit_ydata, 'g--', label='MM Fit \n$R^2$: %.3f' % r2)
+
+                # add labels
                 ax_mm_curve.set_ylabel('$v_i$')
                 ax_mm_curve.set_xlabel('AcP Concentration (uM)')
                 ax_mm_curve.set_ylim([0, max(ydata)*1.2])
                 ax_mm_curve.set_xlim([-max(set(squeeze_kinetics['substrate_conc_uM']))/20, max(set(squeeze_kinetics['substrate_conc_uM']))])
+                ax_mm_curve.set_title('Michaelis-Menten Curve Fit')
                 ax_mm_curve.legend(loc='lower right', fancybox=True, shadow=True)
-                ax_mm_curve.set_title('Michaelis-Menten Fit')
+
+                # # add R2 to legend handles
+                # handles, labels = ax_mm_curve.get_legend_handles_labels()
+                # handles.append(plt.Line2D([0], [0], color='w', markerfacecolor='w', marker='.', markersize=0))
+                # labels.append(f'$R^2$ = {r2:.2f}')
+                # ax_mm_curve.legend(handles, labels, loc='lower right', fancybox=True, shadow=True)
 
 
                 ## progress curve plotting ============================================================
@@ -1190,23 +1202,6 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                     else:
                         # globals()['ax_progress_curve_' + str(ax)].set_yticks([])
                         plt.setp(globals()['ax_progress_curve_' + str(ax)].get_yticklabels(), visible=False)
-
-
-                # plot_progress_curve(export_kinetic_df, 10, ax_first_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                # plot_progress_curve(local_background_df, 10, ax_first_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
-
-                # plot_progress_curve(export_kinetic_df, 25, ax_second_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                # plot_progress_curve(local_background_df, 25, ax_second_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
-
-                # plot_progress_curve(export_kinetic_df, 50, ax_third_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                # plot_progress_curve(local_background_df, 50, ax_third_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
-
-                # plot_progress_curve(export_kinetic_df, 75, ax_fourth_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                # plot_progress_curve(local_background_df, 75, ax_fourth_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
-                
-                # plot_progress_curve(export_kinetic_df, 100, ax_fifth_progress_curve, fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                # plot_progress_curve(local_background_df, 100, ax_fifth_progress_curve, kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
-
 
                 ## table plotting ============================================================
                 table_df = export_mm_df[['Indices', 'EnzymeConc', 'egfp_manual_flag', 'local_bg_ratio', 'kcat_fit', 'KM_fit', 'kcat_over_KM_fit']]
