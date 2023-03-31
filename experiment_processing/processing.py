@@ -1175,12 +1175,6 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                 ax_mm_curve.set_title('Michaelis-Menten Curve Fit')
                 ax_mm_curve.legend(loc='lower right', fancybox=True, shadow=True)
 
-                # # add R2 to legend handles
-                # handles, labels = ax_mm_curve.get_legend_handles_labels()
-                # handles.append(plt.Line2D([0], [0], color='w', markerfacecolor='w', marker='.', markersize=0))
-                # labels.append(f'$R^2$ = {r2:.2f}')
-                # ax_mm_curve.legend(handles, labels, loc='lower right', fancybox=True, shadow=True)
-
 
                 ## progress curve plotting ============================================================
                 
