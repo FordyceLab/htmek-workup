@@ -1,2 +1,2 @@
 # htmek_processing
-Binaries for HT-MEK data processing written in python
+An `.ipynb` interface for HT-MEK data processing written in python
