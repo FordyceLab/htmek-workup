@@ -50,7 +50,7 @@ from os.path import isfile, join
 
 # Format imported data
 def format_data(standard_data, kinetic_data, substrate, egfp_data):
-    """Format dataframes from the processor script
+    """Format dataframes from the processor script. This includes adding indices, substrate information, and EGFP values to the kinetic dataframe.
 
     Parameters
     ----------
@@ -73,10 +73,13 @@ def format_data(standard_data, kinetic_data, substrate, egfp_data):
 
     # include leading zeros
     def string_with_leading_zero(n):
-        if n < 10:
-            n = "0" + str(n)
-        else:
-            n = str(n)
+
+        # convert to string
+        n = str(n)
+
+        # add leading zero if necessary
+        if len(n) == 1:
+            n = '0' + n
 
         return n
 
@@ -875,6 +878,7 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
         # get average of lbg_rates and calculate ratio
         lbg_avg = np.mean(lbg_rates)
         
+        # account for zero-slope rates
         if lbg_avg != 0:
             lbg_ratio = chamber_rate/lbg_avg
         else:
@@ -1050,7 +1054,7 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
     grid_kinetic = grid_kinetic[grid_kinetic.columns[::-1]] # flip horizontally
     grid_kinetic = np.array(grid_kinetic)
     display_cbar = True # only display cbar on last grid
-    norm = matplotlib.colors.Normalize(vmin=0, vmax=10)
+    norm = matplotlib.colors.Normalize(vmin=0, vmax=100)
     im, cbar = heatmap(grid_kinetic,
                         cmap="viridis", 
                         cbarlabel="Local BG Ratio", 
@@ -1177,7 +1181,6 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
 
 
                 ## progress curve plotting ============================================================
-                
                 # find local background indices and store data in new df
                 local_background_indices = get_local_bg_indices(x=x, y=y, device_rows=device_rows) # stores indices of local background chambers in a list
                 local_background_df = pd.DataFrame([])
@@ -1196,6 +1199,7 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                     else:
                         # globals()['ax_progress_curve_' + str(ax)].set_yticks([])
                         plt.setp(globals()['ax_progress_curve_' + str(ax)].get_yticklabels(), visible=False)
+
 
                 ## table plotting ============================================================
                 table_df = export_mm_df[['Indices', 'EnzymeConc', 'egfp_manual_flag', 'local_bg_ratio', 'kcat_fit', 'KM_fit', 'kcat_over_KM_fit']]
