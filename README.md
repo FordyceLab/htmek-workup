@@ -10,6 +10,8 @@ Installation
 To install the package, clone the repository and run the following command in the repository directory:
 
     pip install -e .
+    
+Here, the -e flag makes the install "editable" and automatically propagates changes to packages imported in the notebook.
 
 Usage
 -----
