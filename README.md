@@ -9,7 +9,7 @@ Installation
 ------------
 To install the package, clone the repository and run the following command in the repository directory:
 
-    pip install .
+    pip install -e .
 
 Usage
 -----
