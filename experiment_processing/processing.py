@@ -4,6 +4,7 @@
 
 
 
+
 # Standard imports
 import pandas as pd
 import seaborn as sns
@@ -49,7 +50,7 @@ from os.path import isfile, join
 
 
 # Format imported data
-def format_data(standard_data, kinetic_data, substrate, egfp_data):
+def format_data(standard_data, kinetic_data, egfp_data, substrate=None):
     """Format dataframes from the processor script. This includes adding indices, substrate information, and EGFP values to the kinetic dataframe.
 
     Parameters
@@ -92,16 +93,16 @@ def format_data(standard_data, kinetic_data, substrate, egfp_data):
     kinetic_data = pd.merge(egfp_data[['x', 'y', 'summed_button_BGsub']], kinetic_data, on=['x', 'y']) # add egfp values from separate csv
     kinetic_data['summed_button_BGsub_Button_Quant'] = kinetic_data['summed_button_BGsub'] # move values to correct column
 
-    # add substrate information to standard dataframe
-    standard_data['substrate'] = substrate
-    kinetic_data['substrate_conc_uM'] = kinetic_data.series_index.apply(lambda x: int(x.split('_')[0][:-2]))
-    kinetic_data['substrate'] = substrate
+    # add substrate information to standard dataframe 
+    # standard_data['substrate'] = substrate
+    # kinetic_data['substrate_conc_uM'] = kinetic_data.series_index.apply(lambda x: int(x.split('_')[0][:-2]))
+    # kinetic_data['substrate'] = substrate
 
     return standard_data, kinetic_data
 
 
 # Squeeze kinetics dataframe to serialize timepoints
-def squeeze_kinetics(kinetic_data):
+def squeeze_kinetics(kinetic_data, additional_columns=None):
     """Squeeze kinetics dataframe to serialize timepoints
 
     Parameters
@@ -116,10 +117,15 @@ def squeeze_kinetics(kinetic_data):
     """
 
     # squeeze kinetics dataframe to serialize timepoints
-    columns = ['x', 'y', 'Indices', 'MutantID', 'substrate', 'substrate_conc_uM', 'summed_button_BGsub_Button_Quant']
+    columns = ['x', 'y', 'Indices', 'MutantID', 'substrate', 'substrate_conc_uM', 'summed_button_BGsub_Button_Quant'] 
+
+    # add additional columns if additional_columns is not None
+    if additional_columns is not None:
+        columns = columns + additional_columns
+        
     kinetic_median_intensities = kinetic_data.groupby(columns)['median_chamber'].apply(list).reset_index(name='kinetic_median_intensities')
     times = kinetic_data.groupby(columns)['time_s'].apply(list).reset_index(name='time_s')
-    squeeze_kinetics = pd.merge(times, kinetic_median_intensities, on=['x', 'y', 'Indices', 'substrate', 'MutantID', 'substrate_conc_uM', 'summed_button_BGsub_Button_Quant'])
+    squeeze_kinetics = pd.merge(times, kinetic_median_intensities, on=columns)
 
     # sort by timepoint
     squeeze_kinetics['kinetic_median_intensities'] = squeeze_kinetics.apply(lambda row: np.array(row['kinetic_median_intensities'])[np.argsort(row['time_s'])].tolist(), axis=1)
@@ -147,28 +153,33 @@ def squeeze_standard(standard_data):
     """
 
     # squeeze standard dataframe to serialize standard concentrations
-    standard_median_intensities = standard_data.groupby(['x', 'y', 'Indices', 'substrate'])['median_chamber'].apply(list).reset_index(name='standard_median_intensities')
-    standard_concentration_uM = standard_data.groupby(['x', 'y', 'Indices', 'substrate'])['concentration_uM'].apply(list).reset_index(name='standard_concentration_uM')
-    squeeze_standards = pd.merge(standard_concentration_uM, standard_median_intensities, on=['x', 'y', 'Indices', 'substrate'])
+    standard_median_intensities = standard_data.groupby(['x', 'y', 'Indices'])['median_chamber'].apply(list).reset_index(name='standard_median_intensities')
+    standard_concentration_uM = standard_data.groupby(['x', 'y', 'Indices'])['concentration_uM'].apply(list).reset_index(name='standard_concentration_uM')
+    squeeze_standards = pd.merge(standard_concentration_uM, standard_median_intensities, on=['x', 'y', 'Indices'])
 
     # sort by standard concentration
     squeeze_standards['standard_median_intensities'] = squeeze_standards.apply(lambda row: np.array(row['standard_median_intensities'])[np.argsort(row['standard_concentration_uM'])].tolist(), axis=1)
     squeeze_standards['standard_concentration_uM'] = squeeze_standards.apply(lambda row: np.array(row['standard_concentration_uM'])[np.argsort(row['standard_concentration_uM'])].tolist(), axis=1)
 
     # define linear range of standard curve
-    n = 5
+    min_conc = 1 # 1 to 50 uM 
+    max_conc = 50 # 1 to 50 uM
 
     for i in np.random.randint(0, len(squeeze_standards), 120):
         # plot the relationship
-        plt.scatter(x=squeeze_standards.standard_concentration_uM[i][:-1], y=squeeze_standards.standard_median_intensities[i][:-1], c='grey', alpha=0.2)
-        plt.scatter(x=squeeze_standards.standard_concentration_uM[i][1:n], y=squeeze_standards.standard_median_intensities[i][1:n], c='red', alpha=0.2)
+        plt.scatter(x=squeeze_standards.standard_concentration_uM[i], y=squeeze_standards.standard_median_intensities[i], c='grey', alpha=0.2)
+
+        # add vertical lines to indicate linear regime
+        plt.axvline(x=min_conc, c='red', linestyle='--', alpha=0.5)
+        plt.axvline(x=max_conc, c='red', linestyle='--', alpha=0.5)
+
+        # add title and labels
         plt.title('Standard Curve \n Linear regime in red')
         plt.xlabel('Standard Concentration (uM)')
         plt.ylabel('Median Standard Chamber Intensity (RFU)')
 
     # Manually add handles for scatter plots
     handles = [mpatches.Patch(color='grey', label='Standard Curve'), mpatches.Patch(color='red', label='Linear Regime')]
-               
     plt.legend(fancybox=True, framealpha=1, shadow=True, borderpad=1, handles=handles, loc='lower right')
 
     display(squeeze_standards.head(4))
@@ -177,13 +188,15 @@ def squeeze_standard(standard_data):
 
 
 # Perform standard curve fitting
-def standard_curve_fit(squeeze_standards):
+def standard_curve_fit(squeeze_standards, standard_type):
     """Perform standard curve fitting
 
     Parameters
     ----------
     squeeze_standards : pandas dataframe
         Standard data with standard concentrations serialized
+    standard_type : str
+        Standard type, either 'pbp' or 'linear'
     
     Returns
     -------
@@ -191,25 +204,48 @@ def standard_curve_fit(squeeze_standards):
         Standard data with standard concentrations serialized and curve fit parameters added
     """
 
+    # Perform standard curve fitting for pbp coupled reaction
+    if standard_type == 'pbp':
+        # define pbp isotherm function amd vectorize
+        def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
+        v_func = np.vectorize(isotherm)
 
-    ## Perform standard curve fitting
-    # define isotherm function amd vectorize
-    def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
-    v_isotherm = np.vectorize(isotherm)
+        # define curve fit function
+        # excluded high concentration
+        def standard_curve_fit(df):
 
-    # define curve fit function
-    # excluded high concentration
-    def standard_curve_fit(df):
-        popt, pcov = optimize.curve_fit(isotherm, df.standard_concentration_uM[:-1], df.standard_median_intensities[:-1], bounds=([500, 0, 10, 0], [np.inf, np.inf, np.inf, np.inf])) # A, KD, PS, I_0uMP_i
-        return popt
+            # if curve fit fails, return nan
+            try:
+                popt, pcov = optimize.curve_fit(isotherm, df.standard_concentration_uM[:-1], df.standard_median_intensities[:-1], bounds=([500, 0, 10, 0], [np.inf, np.inf, np.inf, np.inf])) # A, KD, PS, I_0uMP_i
+            except:
+                popt = np.nan
+                
+            return popt
+    
+    # Perform standard curve fitting for fluorogenic substrate
+    elif standard_type == 'linear':
+        # define pbp isotherm function amd vectorize
+        def linear(x, a, b): return a*x + b 
+        v_func = np.vectorize(linear)
+
+        # define curve fit function
+        def standard_curve_fit(df):
+                
+                # if curve fit fails, return nan
+                try:
+                    popt, pcov = optimize.curve_fit(linear, df.standard_concentration_uM, df.standard_median_intensities, bounds=([0, 0], [np.inf, np.inf])) # a, b
+                except:
+                    popt = np.nan
+                    
+                return popt
 
     # fit all standard curves
     print('Performing curve fits...')
+    print('Some curve fits may fail, this is expected and will be replaced with NaNs')
     squeeze_standards['standard_popt'] = squeeze_standards.parallel_apply(standard_curve_fit, axis=1)
 
 
     ## Plot standard curves to check fit
-    # select example chambers
     num_examples = 4
     examples = np.random.randint(0, len(squeeze_standards), num_examples)
 
@@ -224,22 +260,26 @@ def standard_curve_fit(squeeze_standards):
         # finally, define the interpolation
         interp_xdata = np.linspace(-np.min(xdata), np.max(xdata), num=100, endpoint=False)
 
-        axs[k].plot(xdata[:-1], v_isotherm(xdata[:-1], *chamber_popt), 'r-', label='Isotherm Fit')
-        axs[k].plot(interp_xdata[:-1], v_isotherm(interp_xdata[:-1], *chamber_popt), 'g--', label='interpolation')
-        axs[k].plot(xdata[:-1], ydata[:-1], 'bo', label='data')
-        axs[k].set_ylabel('Intensity')
+        axs[k].plot(xdata, v_func(xdata, *chamber_popt), 'r-', label='%s curve fit' % standard_type)
+        axs[k].plot(interp_xdata, v_func(interp_xdata, *chamber_popt), 'g--', label='interpolation')
+        axs[k].plot(xdata, ydata, 'bo', label='data')
         axs[k].set_xlabel('[Pi] (uM)')
-        axs[k].legend(loc='lower right', shadow=True)
         axs[k].set_title('Chamber: ' + chamber_idx)
 
-    fig.suptitle(f'{num_examples} Standard Curves', y=1.1)
+        fig.suptitle(f'{num_examples} Standard Curves and {standard_type} Fits', y=1.1)
+    
+    # add y label to first subplot
+    axs[0].set_ylabel('Intensity')
+
+    # only plot legend for last subplot
+    axs[num_examples-1].legend(loc='lower right', shadow=True)
 
 
     return squeeze_standards
 
 
 # Merge standard and kinetics dataframes and calculate product concentrations by interpolation of standard curve
-def merge_and_get_product_concs(squeeze_kinetics, squeeze_standards):
+def merge_and_get_product_concs(squeeze_kinetics, squeeze_standards, standard_type):
     """Merge standard and kinetics dataframes and calculate product concentrations by interpolation of standard curve
     
     Parameters
@@ -256,28 +296,38 @@ def merge_and_get_product_concs(squeeze_kinetics, squeeze_standards):
     """
 
     # merge standard and kinetics dataframes
-    sq_merged = pd.merge(squeeze_kinetics, squeeze_standards, on=['x', 'y', 'Indices', 'substrate'])
+    sq_merged = pd.merge(squeeze_kinetics, squeeze_standards, on=['x', 'y', 'Indices'])
 
     # define interpolation function
     def interpolate(df):
         # define xdata range for interpolation
         xdata = df.standard_concentration_uM
         
-        # define isotherm function amd vectorize
-        def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
-        v_isotherm = np.vectorize(isotherm)
+        if standard_type == 'pbp':
+            # define isotherm function amd vectorize
+            def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
+            v_func = np.vectorize(isotherm)
+        elif standard_type == 'linear':
+            # define pbp isotherm function amd vectorize
+            def linear(x, a, b): return a*x + b 
+            v_func = np.vectorize(linear)
             
-        # create interpolated look-up dictionary
-        # num corresponds to the number of intervals in the interpolation. 
+        ## Create interpolated look-up dictionary
+        # The variable num corresponds to the number of intervals in the interpolation. 
         # Increasing this number leads to a larger lookup table and better
         # extrapolations of product concs
-        int_xdata = np.linspace(-np.min(xdata), np.max(xdata), num=2000, endpoint=False)
-        d = dict(zip(v_isotherm(int_xdata, *df.standard_popt), int_xdata))
+        try:
+            int_xdata = np.linspace(-np.min(xdata), np.max(xdata), num=2000, endpoint=False)
+            d = dict(zip(v_func(int_xdata, *df.standard_popt), int_xdata))
 
-        # estimate product concentration from lookup dictionary
-        product_concs = [ d.get(i, d[min(d.keys(), key=lambda k: abs(k - i))]) for i in df.kinetic_median_intensities]
+            # estimate product concentration from lookup dictionary
+            product_concs = [ d.get(i, d[min(d.keys(), key=lambda k: abs(k - i))]) for i in df.kinetic_median_intensities]
 
-        return product_concs
+            return product_concs
+        except:
+            print('Curve fit failed for chamber: ' + df.Indices)
+            print(df.standard_popt)
+            return np.nan
     
     # calculate product concentrations
     print('Calculating product concentrations...')
@@ -559,50 +609,53 @@ def get_initial_rates(sq_merged, pbp_conc = 30):
     # define the least-squares algorithm
     def fit_initial_rate_row(row, pbp_conc=pbp_conc):
 
-        substrate_conc = row.substrate_conc_uM
-        x, y = row.time_s, row.kinetic_product_concentration_uM
-        full_x, full_y = x, y 
-        first_third = int(len(x)*0.3)
-        regime = 0
+        try:
+            substrate_conc = row.substrate_conc_uM
+            x, y = row.time_s, row.kinetic_product_concentration_uM
+            # full_x, full_y = x, y 
+            first_third = int(len(x)*0.3)
+            regime = 0
 
-        if substrate_conc < pbp_conc: # "regime 1"
-            regime = 1
-            if y[1] >= 0.3*substrate_conc: # fit two points, flag as a two point fit
-                x = x[1:3]
-                y = y[1:3]
-            else: # fit first 30% of the series
+            if substrate_conc < pbp_conc: # "regime 1"
+                regime = 1
+                if y[1] >= 0.3*substrate_conc: # fit two points, flag as a two point fit
+                    x = x[1:3]
+                    y = y[1:3]
+                else: # fit first 30% of the series
+                    x = x[1:first_third]
+                    y = y[1:first_third]
+
+            # "regime 2": 30% of the substrate concentration is greater than 2/3 the concentration of PBP.
+            elif 0.3*substrate_conc > (2/3)*pbp_conc: # regime "2"
+                regime = 2
                 x = x[1:first_third]
                 y = y[1:first_third]
 
-        # "regime 2": 30% of the substrate concentration is greater than 2/3 the concentration of PBP.
-        elif 0.3*substrate_conc > (2/3)*pbp_conc: # regime "2"
-            regime = 2
-            x = x[1:first_third]
-            y = y[1:first_third]
+            # "regime 3": 30% of the substrate concentration is below 2/3 the concentration of PBP. 
+            elif 0.3*substrate_conc < (2/3)*pbp_conc: # regime "3"
+                regime = 3
+                x = x[1:first_third]
+                y = y[1:first_third]
+                # y = [ i for i in y if i < 0.3 * substrate_conc ] # fit points only if less than 30% of substrate conc
+                # x = x[:len(y)]
 
-        # "regime 3": 30% of the substrate concentration is below 2/3 the concentration of PBP. 
-        elif 0.3*substrate_conc < (2/3)*pbp_conc: # regime "3"
-            regime = 3
-            x = x[1:first_third]
-            y = y[1:first_third]
-            # y = [ i for i in y if i < 0.3 * substrate_conc ] # fit points only if less than 30% of substrate conc
-            # x = x[:len(y)]
+            # reshape the arrays for least-squares regression
+            x = np.array(x)
+            y = np.array(y)
 
-        # reshape the arrays for least-squares regression
-        x = np.array(x)
-        y = np.array(y)
+            # perform fit
+            m, c = np.linalg.lstsq(np.vstack([x, np.ones(len(x))]).T, y, rcond=None)[0] # stores initial rate and intercept, the first two objects in the array
 
-        # perform fit
-        m, c = np.linalg.lstsq(np.vstack([x, np.ones(len(x))]).T, y, rcond=None)[0] # stores initial rate and intercept, the first two objects in the array
-
-        # set two point flag
-        if len(x) == 2:
-            two_point = True
-        else:
-            two_point = False
-            
-        return m, c, two_point, regime
-
+            # set two point flag
+            if len(x) == 2:
+                two_point = True
+            else:
+                two_point = False
+                
+            return m, c, two_point, regime
+        except:
+            return np.nan, np.nan, np.nan, np.nan
+    
     # next, store the slope in a new column
     print('Fitting initial rates...')
     results = sq_merged.apply(fit_initial_rate_row, axis=1)
@@ -615,34 +668,53 @@ def get_initial_rates(sq_merged, pbp_conc = 30):
     sq_merged['rate_fit_regime'] = results.apply(lambda x: x[3])
 
 
-    # Plot several initial rates
+    ## Plot several initial rates
     print('Plotting progress curves for one random mutant...')
+    
     # set list of substrate concentrations
     concs = sorted(list(set(sq_merged['substrate_conc_uM'])))
+    substrates = sorted(list(set(sq_merged['substrate'])))
     conc_d = dict(zip(range(len(concs)), concs))
 
     # sample a random mutants and subset the progress curve dictionary
     check = np.random.choice(list(set(sq_merged['MutantID'])), 1)[0]
     my_df = sq_merged[sq_merged['MutantID'] == check]
-    my_df
 
-    fig, axs = plt.subplots(ncols=5, figsize=(10, 3), sharey=True)
+    # plot the progress curves
+    if len(concs) > 1:
+        ncols = len(concs)
+    else:
+        ncols = 2
 
+    fig, axs = plt.subplots(ncols=ncols, figsize=(10, 3), sharey=True)
+
+    # 
     for k,v in conc_d.items():
         v_df = my_df[my_df['substrate_conc_uM'] == v]
+        v_df = v_df.head(50)
 
         for index, row in v_df.iterrows():
-            times, product_concs = row['time_s'], row['kinetic_product_concentration_uM']
-            m, b = row.initial_rate, row.initial_rate_intercept
-            indices = row.Indices
+            try:
+                times, product_concs = row['time_s'], row['kinetic_product_concentration_uM']
+                m, b = row.initial_rate, row.initial_rate_intercept
+                substrate = row.substrate
+                indices = row.Indices
 
-            axs[k].scatter(times, product_concs, s=10)
-            axs[k].plot([0, max(times)], [b, m*max(times)+b], '--')
-            axs[k].set_title(str(v) + 'uM AcP')
-            axs[k].set_xlim(0, 2000)
-            axs[k].set_ylim(0, pbp_conc)
-            axs[k].set_ylim(0, pbp_conc)
-            axs[k].set_xlabel('Time (s)')
+                axs[k].scatter(times, product_concs, s=10, label=row['substrate'])
+                axs[k].plot([0, max(times)], [b, m*max(times)+b], '--')
+                axs[k].set_title(str(v) + substrate)
+                axs[k].set_xlim(0, 2000)
+                axs[k].set_ylim(0, pbp_conc)
+                axs[k].set_ylim(0, pbp_conc)
+                axs[k].set_xlabel('Time (s)')
+            except:
+                axs[k].scatter(times, [0]*len(times), s=10)
+                axs[k].plot([0, max(times)], [b, m*max(times)+b], '--')
+                axs[k].set_title(str(v) + substrate)
+                axs[k].set_xlim(0, 2000)
+                axs[k].set_ylim(0, pbp_conc)
+                axs[k].set_ylim(0, pbp_conc)
+                axs[k].set_xlabel('Time (s)')
 
     # only set the y label for the first plot
     axs[0].set_ylabel('Product Concentration (uM)')
@@ -675,6 +747,10 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
 
     # =================================================================================================
     # DATAFRAME SETUP
+
+    # if egfp_manual_flag column does not exist, create it
+    if 'egfp_manual_flag' not in sq_merged.columns:
+        sq_merged['egfp_manual_flag'] = np.nan
 
     # first, group by Indices to create initial rate and substrate conc series
     initial_rates = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['initial_rate'].apply(list).reset_index(name='initial_rates')
