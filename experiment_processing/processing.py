@@ -138,7 +138,7 @@ def squeeze_kinetics(kinetic_data, additional_columns=None):
 
 
 # Squeeze standard dataframe to serialize standard concentrations
-def squeeze_standard(standard_data):
+def squeeze_standard(standard_data, remove_concs=None, manual_concs=None):
     """Squeeze standard dataframe to serialize standard concentrations
     
     Parameters
@@ -160,6 +160,16 @@ def squeeze_standard(standard_data):
     # sort by standard concentration
     squeeze_standards['standard_median_intensities'] = squeeze_standards.apply(lambda row: np.array(row['standard_median_intensities'])[np.argsort(row['standard_concentration_uM'])].tolist(), axis=1)
     squeeze_standards['standard_concentration_uM'] = squeeze_standards.apply(lambda row: np.array(row['standard_concentration_uM'])[np.argsort(row['standard_concentration_uM'])].tolist(), axis=1)
+
+    # remove concentrations if necessary
+    if remove_concs is not None:
+        # get positions of concs in lists stored in standard_concentration_uM column of standard_data
+        conc_list = squeeze_standards['standard_concentration_uM'].iloc[0]
+        positions = [i for i, x in enumerate(conc_list) if x in remove_concs]
+
+        # remove concentrations from standard_data columns standard_concentration_uM and standard_median_intensities
+        squeeze_standards['standard_concentration_uM'] = squeeze_standards['standard_concentration_uM'].apply(lambda x: [i for j, i in enumerate(x) if j not in positions])
+        squeeze_standards['standard_median_intensities'] = squeeze_standards['standard_median_intensities'].apply(lambda x: [i for j, i in enumerate(x) if j not in positions])
 
     # define linear range of standard curve
     min_conc = 1 # 1 to 50 uM 
@@ -188,7 +198,7 @@ def squeeze_standard(standard_data):
 
 
 # Perform standard curve fitting
-def standard_curve_fit(squeeze_standards, standard_type):
+def standard_curve_fit(squeeze_standards, standard_type, manual_concs=None):
     """Perform standard curve fitting
 
     Parameters
@@ -244,6 +254,22 @@ def standard_curve_fit(squeeze_standards, standard_type):
     print('Some curve fits may fail, this is expected and will be replaced with NaNs')
     squeeze_standards['standard_popt'] = squeeze_standards.parallel_apply(standard_curve_fit, axis=1)
 
+    # interpolate points manually if necessary
+    if manual_concs is not None:
+        for i in manual_concs:
+            for index, row in squeeze_standards.iterrows():
+                # skip if concentration already in list
+                if i in row['standard_concentration_uM']:
+                    continue
+               
+                # if curve fit failed for a particular chamber, skip
+                try:
+                    # add to standard_concentration_uM column
+                    row['standard_concentration_uM'].append(i)
+                    # approx conc from curve fit
+                    row['standard_median_intensities'].append(v_func(i, *row['standard_popt']))
+                except:
+                    pass
 
     ## Plot standard curves to check fit
     num_examples = 4
@@ -303,27 +329,33 @@ def merge_and_get_product_concs(squeeze_kinetics, squeeze_standards, standard_ty
         # define xdata range for interpolation
         xdata = df.standard_concentration_uM
         
+        # if using a pbp coupled assay, define the isotherm function
         if standard_type == 'pbp':
             # define isotherm function amd vectorize
             def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
             v_func = np.vectorize(isotherm)
+
+        # if using a fluorogenic substrate, define the linear function
         elif standard_type == 'linear':
             # define pbp isotherm function amd vectorize
             def linear(x, a, b): return a*x + b 
             v_func = np.vectorize(linear)
             
         ## Create interpolated look-up dictionary
-        # The variable num corresponds to the number of intervals in the interpolation. 
+        # The variable 'num' corresponds to the number of intervals in the interpolation. 
         # Increasing this number leads to a larger lookup table and better
         # extrapolations of product concs
         try:
-            int_xdata = np.linspace(-np.min(xdata), np.max(xdata), num=2000, endpoint=False)
+            # create lookup dictionary from xdata range
+            int_xdata = np.linspace(start=-np.min(xdata)*10, stop=np.max(xdata), num=2000, endpoint=False)
             d = dict(zip(v_func(int_xdata, *df.standard_popt), int_xdata))
 
-            # estimate product concentration from lookup dictionary
+            # estimate product concentration from lookup dictionary, using the lookup key closest to the median intensity
             product_concs = [ d.get(i, d[min(d.keys(), key=lambda k: abs(k - i))]) for i in df.kinetic_median_intensities]
 
+
             return product_concs
+
         except:
             print('Curve fit failed for chamber: ' + df.Indices)
             print(df.standard_popt)
@@ -565,6 +597,7 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
     # Check export directory for a previous culling record
     files = os.listdir(culling_export_directory)
 
+    # If culling record exists, load it and create a set of flagged chambers
     culling_record_exists = False
     for file in files:
         if 'cull' in file and '.csv' in file:
@@ -578,19 +611,27 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
         df = pd.read_csv(culling_export_filepath)
         flagged_set = set(df.loc[df['egfp_manual_flag'] == True]['Indices'])
 
+        # add flagged chambers to sq_merged
+        bool_flagged_set = set(sq_merged.loc[sq_merged['Indices'].isin(flagged_set)]['Indices'])
+        sq_merged['egfp_manual_flag'] = sq_merged.Indices.apply(lambda i: i in bool_flagged_set)
+
+    # If culling record does not exist, create a new one
     elif culling_record_exists == False:
         print('Creating new culling record.')
+
+        # create new column in sq_merged to store culling status based on flagged set
+        bool_flagged_set = set(sq_merged.loc[sq_merged['Indices'].isin(flagged_set)]['Indices'])
+        sq_merged['egfp_manual_flag'] = sq_merged.Indices.apply(lambda i: i in bool_flagged_set)
+
+        # save culling record
         culling_export_filepath = os.path.join(culling_export_directory, 'manual_culling_record.csv')
         sq_merged.sort_values(['x', 'y',  'MutantID', 'substrate_conc_uM', 'egfp_manual_flag']).to_csv(culling_export_filepath, index=False)
         print('Saved culling record to %s' % culling_export_filepath)
 
-    # create new column in sq_merged to store culling status based on flagged set
-    bool_flagged_set = set(df.loc[df['egfp_manual_flag'] == True]['Indices'])
-    sq_merged['egfp_manual_flag'] = sq_merged.Indices.apply(lambda i: i in bool_flagged_set)
-
     return sq_merged
 
 
+# Get initial rates
 def get_initial_rates(sq_merged, pbp_conc = 30):
     """
     Parameters
@@ -634,10 +675,8 @@ def get_initial_rates(sq_merged, pbp_conc = 30):
             # "regime 3": 30% of the substrate concentration is below 2/3 the concentration of PBP. 
             elif 0.3*substrate_conc < (2/3)*pbp_conc: # regime "3"
                 regime = 3
-                x = x[1:first_third]
-                y = y[1:first_third]
-                # y = [ i for i in y if i < 0.3 * substrate_conc ] # fit points only if less than 30% of substrate conc
-                # x = x[:len(y)]
+                x = x[0:first_third]
+                y = y[0:first_third]
 
             # reshape the arrays for least-squares regression
             x = np.array(x)
@@ -669,7 +708,7 @@ def get_initial_rates(sq_merged, pbp_conc = 30):
 
 
     ## Plot several initial rates
-    print('Plotting progress curves for one random mutant...')
+    print('Plotting progress curves for one random library member...')
     
     # set list of substrate concentrations
     concs = sorted(list(set(sq_merged['substrate_conc_uM'])))
@@ -688,7 +727,7 @@ def get_initial_rates(sq_merged, pbp_conc = 30):
 
     fig, axs = plt.subplots(ncols=ncols, figsize=(10, 3), sharey=True)
 
-    # 
+    # loop through the concentrations
     for k,v in conc_d.items():
         v_df = my_df[my_df['substrate_conc_uM'] == v]
         v_df = v_df.head(50)
@@ -704,16 +743,14 @@ def get_initial_rates(sq_merged, pbp_conc = 30):
                 axs[k].plot([0, max(times)], [b, m*max(times)+b], '--')
                 axs[k].set_title(str(v) + substrate)
                 axs[k].set_xlim(0, 2000)
-                axs[k].set_ylim(0, pbp_conc)
-                axs[k].set_ylim(0, pbp_conc)
+                axs[k].set_ylim(top=pbp_conc)
                 axs[k].set_xlabel('Time (s)')
             except:
                 axs[k].scatter(times, [0]*len(times), s=10)
                 axs[k].plot([0, max(times)], [b, m*max(times)+b], '--')
                 axs[k].set_title(str(v) + substrate)
                 axs[k].set_xlim(0, 2000)
-                axs[k].set_ylim(0, pbp_conc)
-                axs[k].set_ylim(0, pbp_conc)
+                axs[k].set_ylim(top=pbp_conc)
                 axs[k].set_xlabel('Time (s)')
 
     # only set the y label for the first plot
@@ -764,7 +801,7 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
     if np.min(all_substrate_concs) != 0:
         squeeze_mm['substrate_concs'] = squeeze_mm['substrate_concs'].apply(lambda x: [0] + x)
         squeeze_mm['initial_rates'] = squeeze_mm['initial_rates'].apply(lambda x: [0] + x)
-    
+
     # =================================================================================================
     # FIT MICHAELIS-MENTEN EQUATION
 
@@ -778,36 +815,21 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
         name = df.MutantID
 
         # now, exclude substrate concentrations from fit if needed
-        for conc in exclude_concs:
-            if conc in xdata:
-                conc_index = xdata.index(conc)
+        if exclude_concs != None:
+            for conc in exclude_concs:
+                if conc in xdata:
+                    conc_index = xdata.index(conc)
 
-                del xdata[conc_index]
-                del ydata[conc_index]
-
+                    del xdata[conc_index]
+                    del ydata[conc_index]
         ydata_final = ydata
         xdata_final = xdata
-        
-        # # IN DEVELOPMENT: remove non-approximately increasing rates
-        # final_index = 0
-        # for index, rate in enumerate(ydata):
-        #     if index > 0:
-        #         if ydata[index] > (ydata[index-1] * 0.8) :
-        #             # trunc_ydata = ydata[:index+1]
-        #             final_index += 1
-        #         else:
-        #             final_index += 0
-
-        # xdata_final = xdata[:final_index]
-        # ydata_final = ydata[:final_index]
-
-        # if '1A1_' in name:
-        #     xdata_final = xdata[:3]
-        #     ydata_final = ydata[:3]
-            
 
         # perform curve fit
-        mm_params, pcov = optimize.curve_fit(mm_func, xdata=xdata_final, ydata=ydata_final, bounds=([0, 0], [np.inf, np.inf]))
+        try:
+            mm_params, pcov = optimize.curve_fit(mm_func, xdata=xdata_final, ydata=ydata_final, bounds=([0, 0], [np.inf, np.inf]))
+        except:
+            mm_params = [np.nan, np.nan]
 
         # store variables
         KM_fit = mm_params[0] # at this point, this is in uM
@@ -960,6 +982,10 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
         else:
             lbg_ratio = 0
 
+        # account for negative ratios
+        if lbg_ratio < 0:
+            lbg_ratio = 0
+
         # store ratio in new column
         local_bg_df.loc[index, 'local_bg_ratio'] = lbg_ratio
 
@@ -976,7 +1002,7 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
 # ==========================================================================================
 
 # plot progress curves in PDF output file
-def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, fit_descriptors=False, exclude_concs=[]):
+def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_conc, substrate_name, fit_descriptors=False, exclude_concs=[]):
     """
     Inputs:
         - concs: current substrate concentrations
@@ -997,33 +1023,33 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, fit_d
         regime = row['rate_fit_regime']
         two_point_fit = row['two_point_fit']
 
-        # plot data for the current chamber
-        ax.scatter(times, product_concs, **kwargs_for_scatter) # plot progress curve
-        ax.plot(times, (times*vi) + intercept, **kwargs_for_line) # plot initial rate line
-        # ax.set_xticklabels([]) # remove tick labels
+        # plot data for the current chamber if it is not NaN
+        if type(product_concs) == list:
+            ax.scatter(times, product_concs, **kwargs_for_scatter) # plot progress curve
+            ax.plot(times, (times*vi) + intercept, **kwargs_for_line) # plot initial rate line
+            # ax.set_xticklabels([]) # remove tick labels
 
-        if fit_descriptors==True:
+            if fit_descriptors==True:
 
-            # add regime text
-            ax.text(0, -0.45, "Fit Regime: " + str(regime), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                # add regime text
+                ax.text(0, -0.45, "Fit Regime: " + str(regime), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
 
-            # add two-point fit
-            if two_point_fit == True:
-                ax.text(0, -0.6, "Two-point: " + str(two_point_fit), color='red', transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
-            else:
-                ax.text(0, -0.6, "Two-point: " + str(two_point_fit), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
-            
-            # add MM exclusion text
-            if conc in exclude_concs:
-                ax.text(0, -0.75, "MM-fit: Held out", transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                # add two-point fit
+                if two_point_fit == True:
+                    ax.text(0, -0.6, "Two-point: " + str(two_point_fit), color='red', transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                else:
+                    ax.text(0, -0.6, "Two-point: " + str(two_point_fit), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                
+                # add MM exclusion text
+                if conc in exclude_concs:
+                    ax.text(0, -0.75, "MM-fit: Held out", transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
 
-            # add initial rate text
-            ax.text(0, -0.9, "$V_i$: " + str(round(vi, 5)), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                # add initial rate text
+                ax.text(0, -0.9, "$V_i$: " + str(round(vi, 5)), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
 
-        ax.set_title(str(conc) + 'uM AcP')
-        ax.set_box_aspect(1)
-        # ax.set_ylim([0, max(product_concs)*1.2])
-        ax.set_ylim([0, 30])
+            ax.set_title(str(conc) + ' uM ' + substrate_name)
+            ax.set_box_aspect(1)
+            ax.set_ylim([-10, pbp_conc*1.2])
 
 
 # plot heatmap in PDF output file
@@ -1082,7 +1108,7 @@ def heatmap(data, ax=None, norm=None,
 
 
 # main function to plot progress curves, heatmap, and chamber descriptors for experiment
-def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, exclude_concs=[]):
+def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, pbp_conc, substrate, starting_chamber=None, exclude_concs=[]):
 
     # create export directory
     newpath = export_path_root + '/PDF/pages/'
@@ -1096,7 +1122,7 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
 
     # increase the spacing between the subplots
     fig.subplots_adjust(wspace=4, hspace=0.7)
-    fig.suptitle(' '.join([experimental_day, experiment_name, 'Summary']))
+    fig.suptitle(' '.join([experimental_day, experiment_name, substrate, 'Summary']))
 
     ## defining subplots ============================================================
     ax_conc_heatmap = plt.subplot2grid((5, 6), (0, 0), rowspan=2, colspan=2) # enzyme concentration heatmap
@@ -1116,7 +1142,7 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
     norm = matplotlib.colors.Normalize(vmin=0, vmax=100)
     im, cbar = heatmap(grid_EC,
                         cmap="plasma", 
-                        cbarlabel="Enzyme Conc (uM)", 
+                        cbarlabel="Enzyme Conc (nM)", 
                         display_cbar=display_cbar,
                         ax=ax_conc_heatmap,
                         norm=norm
@@ -1165,13 +1191,21 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
     def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
     v_isotherm = np.vectorize(isotherm)
 
+    # initialize starting chamber
+    start_x = 1
+    start_y = 1
+
+    # if user specifies starting chamber, start from there
+    if starting_chamber is not None:
+        start_x = starting_chamber[0]
+        start_y = starting_chamber[1]
 
     # initialize tqdm
     with tqdm(total = device_columns * device_rows) as pbar:
 
         # Plot Chamber-wise Summaries
-        for x in range(1, device_columns + 1, 1):
-            for y in range(1, device_rows + 1, 1):
+        for x in range(start_x, device_columns + 1, 1):
+            for y in range(start_y, device_rows + 1, 1):
                 
                 ## initialize data df ============================================================
                 export_kinetic_df = sq_merged[sq_merged['Indices'] == f"{x:02d}" + ',' + f"{y:02d}"]
@@ -1218,8 +1252,9 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                 interp_xdata = np.linspace(-np.min(xdata), np.max(xdata), num=100, endpoint=False)
 
                 # plot
-                ax_pbp_std_curve.plot(xdata, v_isotherm(xdata, *chamber_popt), 'r-', label='Isotherm Fit')
-                ax_pbp_std_curve.plot(interp_xdata, v_isotherm(interp_xdata, *chamber_popt), color='g', linestyle='dashed', label='interpolation')
+                if type(chamber_popt) != float: # if fit is successful
+                    ax_pbp_std_curve.plot(xdata, v_isotherm(xdata, *chamber_popt), 'r-', label='Isotherm Fit')
+                    ax_pbp_std_curve.plot(interp_xdata, v_isotherm(interp_xdata, *chamber_popt), color='g', linestyle='dashed', label='interpolation')
                 ax_pbp_std_curve.scatter(xdata, ydata, color='b', s=50, alpha=0.4, label='data')
                 ax_pbp_std_curve.set_ylabel('Intensity')
                 ax_pbp_std_curve.set_xlabel('Pi Concentration (uM)')
@@ -1266,12 +1301,12 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
 
                 # plot curves
                 for ax, conc in enumerate(sorted(concs)):
-                    plot_progress_curve(export_kinetic_df, conc=conc, ax=globals()['ax_progress_curve_' + str(ax)] , fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'})
-                    plot_progress_curve(local_background_df, conc=conc, ax=globals()['ax_progress_curve_' + str(ax)], kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'})
+                    plot_progress_curve(export_kinetic_df, conc=conc, ax=globals()['ax_progress_curve_' + str(ax)] , fit_descriptors=True, kwargs_for_scatter={"s": 10, "c": 'blue'}, kwargs_for_line={"c": 'blue'}, pbp_conc=pbp_conc, substrate_name=substrate)
+                    plot_progress_curve(local_background_df, conc=conc, ax=globals()['ax_progress_curve_' + str(ax)], kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'}, pbp_conc=pbp_conc, fit_descriptors=False, substrate_name=substrate)
 
                     # set ylabel on first (left-most) plot
                     if ax == 0:
-                        globals()['ax_progress_curve_' + str(ax)].set_ylabel('Intensity')
+                        globals()['ax_progress_curve_' + str(ax)].set_ylabel('Product Conc (uM)')
                     else:
                         # globals()['ax_progress_curve_' + str(ax)].set_yticks([])
                         plt.setp(globals()['ax_progress_curve_' + str(ax)].get_yticklabels(), visible=False)
@@ -1301,7 +1336,7 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
 
 
 # merge all pdfs into one
-def merge_pdfs(export_path_root):
+def merge_pdfs(export_path_root, substrate, experimental_day):
 
     # set path
     mypath = export_path_root + '/PDF/'
@@ -1325,7 +1360,7 @@ def merge_pdfs(export_path_root):
 
     # write merged pdf to file
     print('Writing merged pdf to file...')
-    merger.write(mypath + 'merged.pdf')
+    merger.write(mypath + 'merged_' + substrate + '_' + experimental_day + '.pdf')
     print('Done.')
 
     # close merger
