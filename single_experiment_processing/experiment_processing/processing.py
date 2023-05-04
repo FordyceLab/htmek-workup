@@ -10,6 +10,7 @@ import pandas as pd
 import seaborn as sns
 import numpy as np
 import re
+import bisect
 
 # plotting
 import matplotlib 
@@ -264,10 +265,11 @@ def standard_curve_fit(squeeze_standards, standard_type, manual_concs=None):
                
                 # if curve fit failed for a particular chamber, skip
                 try:
-                    # add to standard_concentration_uM column
-                    row['standard_concentration_uM'].append(i)
+                    # insert in sorted order
+                    row['standard_concentration_uM'].insert(bisect.bisect_left(row['standard_concentration_uM'], i), i)
+                    conc_index = row['standard_concentration_uM'].index(i)
                     # approx conc from curve fit
-                    row['standard_median_intensities'].append(v_func(i, *row['standard_popt']))
+                    row['standard_median_intensities'].insert(conc_index, v_func(i, *row['standard_popt']))
                 except:
                     pass
 
@@ -283,16 +285,21 @@ def standard_curve_fit(squeeze_standards, standard_type, manual_concs=None):
         chamber_idx = squeeze_standards.Indices[v]
         chamber_popt = squeeze_standards.standard_popt[v]
 
-        # finally, define the interpolation
-        interp_xdata = np.linspace(-np.min(xdata), np.max(xdata), num=100, endpoint=False)
+        # if curve fit failed for a particular chamber, skip
+        try:
+            # finally, define the interpolation
+            interp_xdata = np.linspace(-np.mean(xdata), np.max(xdata), num=100, endpoint=False)
 
-        axs[k].plot(xdata, v_func(xdata, *chamber_popt), 'r-', label='%s curve fit' % standard_type)
-        axs[k].plot(interp_xdata, v_func(interp_xdata, *chamber_popt), 'g--', label='interpolation')
-        axs[k].plot(xdata, ydata, 'bo', label='data')
-        axs[k].set_xlabel('[Pi] (uM)')
-        axs[k].set_title('Chamber: ' + chamber_idx)
+            axs[k].plot(xdata, v_func(xdata, *chamber_popt), 'r-', label='%s curve fit' % standard_type)
+            axs[k].plot(interp_xdata, v_func(interp_xdata, *chamber_popt), 'g--', label='interpolation')
+            axs[k].plot(xdata, ydata, 'bo', label='data')
+            axs[k].set_xlabel('[Pi] (uM)')
+            axs[k].set_title('Chamber: ' + chamber_idx)
 
-        fig.suptitle(f'{num_examples} Standard Curves and {standard_type} Fits', y=1.1)
+            fig.suptitle(f'{num_examples} Standard Curves and {standard_type} Fits', y=1.1)
+
+        except:
+            pass
     
     # add y label to first subplot
     axs[0].set_ylabel('Intensity')
@@ -347,7 +354,7 @@ def merge_and_get_product_concs(squeeze_kinetics, squeeze_standards, standard_ty
         # extrapolations of product concs
         try:
             # create lookup dictionary from xdata range
-            int_xdata = np.linspace(start=-np.min(xdata)*10, stop=np.max(xdata), num=2000, endpoint=False)
+            int_xdata = np.linspace(start=-np.mean(xdata), stop=np.max(xdata), num=2000, endpoint=False)
             d = dict(zip(v_func(int_xdata, *df.standard_popt), int_xdata))
 
             # estimate product concentration from lookup dictionary, using the lookup key closest to the median intensity
@@ -458,27 +465,16 @@ def make_button_grid(button_stamps_subset):
 # Invoking ipywidget functions above, create button array to manually cull chambers
 def manual_culling(sq_merged, egfp_button_summary_image_path, NUM_ROWS, NUM_COLS, culling_export_directory):
     """
-    Parameters
-    ----------
-    sq_merged : pandas dataframe
-        Contains kinetic and standard data for all chambers.
-    egfp_button_summary_image_path : string
-        Points to directory of eGFP button summary image form segmentation.
-    NUM_ROWS : int
-        Number of rows in device.
-    NUM_COLS : int
-        Number of columns in device.
-    culling_export_directory : string
-        Points to directory where culling record will be saved.
+    Parameters:
+    sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers.
+    egfp_button_summary_image_path (string): Path to directory containing eGFP images for each chamber.
+    NUM_ROWS (int): Number of rows in the button grid.
+    NUM_COLS (int): Number of columns in the button grid.
 
-    Returns
-    -------
-    button_grid : ipywidgets grid object
-        Interactive grid of buttons with eGFP images for each chamber.
-    flagged_set : set
-        Set of chamber indices that were flagged for culling.
-    button_stamps: list
-        List of tuples containing button stamp details.
+    Returns:
+    flagged_set (set): Set of chamber indices to be culled.
+    button_grid (ipywidget): Widget containing button grid for manual culling.
+    button_stamps (list):
     """
 
     # Check export directory for a previous culling record
@@ -579,19 +575,15 @@ def manual_culling(sq_merged, egfp_button_summary_image_path, NUM_ROWS, NUM_COLS
 # Handle flagged chambers
 def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
     """
-    Parameters
-    ----------
-    sq_merged : pandas dataframe
-        Contains kinetic and standard data for all chambers.
-    flagged_set : set
-        Contains chamber indices of flagged chambers.
-    culling_export_directory : string
-        Points to directory where culling record will be saved.
+    Parameters:
+    sq_merged (pandas dataframe): Contains kinetic and standard data for all 
+                                    chambers, with flagged chambers removed.
+    flagged_set (set): Set of chamber indices that were flagged for culling.
+    culling_export_directory (str): Path to directory where culling record is stored.
 
-    Returns
-    -------
-    sq_merged : pandas dataframe
-        Contains kinetic and standard data for all chambers, with flagged chambers removed.
+    Returns:
+    sq_merged (pandas dataframe): Contains kinetic and standard data for all 
+                                    chambers, with flagged chambers removed.
     """
 
     # Check export directory for a previous culling record
@@ -634,17 +626,13 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
 # Get initial rates
 def get_initial_rates(sq_merged, pbp_conc = 30):
     """
-    Parameters
-    ----------
-    sq_merged : pandas dataframe
-        Contains kinetic and standard data for all chambers.
-    pbp_conc : float, optional
-        The concentration of Phosphate Binding Protein (PBP) in uM. The default is 30.
+    Parameters:
+    sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers.
+    pbp_conc (int): Concentration of PBP in uM.
     
-    Returns
-    -------
-    sq_merged : pandas
-        Contains kinetic and standard data for all chambers, with initial rates calculated.
+    Returns:
+    sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers, 
+                                    with initial rates added.
     """
 
     # define the least-squares algorithm
@@ -771,15 +759,17 @@ v_mm_func = np.vectorize(mm_func)
 # fit michaelis-menten equation to the initial rates
 def fit_michaelis_menten(sq_merged, exclude_concs):
     """
-    Parameters
-    ----------
-    sq_merged : pandas dataframe
-        Contains kinetic and standard data for all chambers, with initial rates calculated.
+    Fits the Michaelis-Menten equation to the initial rates of the progress curves.
 
-    Returns
-    -------
-    sq_merged : pandas dataframe
-        Contains kinetic and standard data for all chambers, with initial rates calculated and Michaelis-Menten fit parameters calculated.
+    Parameters:
+    sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers, 
+                                    with initial rates calculated.
+    exclude_concs (list): List of substrate concentrations to exclude from the fit.
+
+    Returns:
+    sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers, 
+                                    with initial rates calculated and Michaelis-Menten 
+                                    fit parameters calculated.
     """
 
     # =================================================================================================
@@ -836,8 +826,9 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
         vmax_fit = mm_params[1] # at this point, in uM per second
         kcat_fit = vmax_fit/(enzyme_conc/1000) # at this point, enzyme conc is in nM, so convert to uM; kcat is in s^-1
         kcat_over_KM_fit = 10**6 * kcat_fit/KM_fit # at this point, kcat in s^-1 and KM in uM, so multiply by 1000000 to give s^-1 * M^-1 
+        r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2
 
-        return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, xdata_final, ydata_final
+        return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, xdata_final, ydata_final, r2
 
     # apply function and store fit parameters
     print('Fitting Michaelis-Menten curves...')
@@ -850,9 +841,8 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
     squeeze_mm['kcat_over_KM_fit'] = results.apply(lambda x: x[3])
     squeeze_mm['substrate_concs'] = results.apply(lambda x: x[4])
     squeeze_mm['initial_rates'] = results.apply(lambda x: x[5])
+    squeeze_mm['kcat_over_KM_fit_R2'] = results.apply(lambda x: x[6])
 
-
-    # ==========================================================================================
     # PLOT EXAMPLES
     # select example chambers to plot
     print('Plotting examples...')
@@ -890,17 +880,13 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
 def get_local_bg_indices(x,y,device_rows):
     """Get indices of local background chambers for a given chamber.
 
-    Parameters
-    ----------
-    x : int
-        x coordinate of chamber
-    y : int
-        y coordinate of chamber
+    Arguments:
+    x (int): x coordinate of chamber
+    y (int): y coordinate of chamber
+    device_rows (int): number of rows in device
 
-    Returns
-    -------
-    local_bg_indices : list
-        list of tuples containing x and y coordinates of local background chambers
+    Returns:
+    local_bg_indices (list): list of tuples containing x and y coordinates of local background chambers
     """
     
     # initialize list of indices
@@ -925,17 +911,14 @@ def get_local_bg_indices(x,y,device_rows):
 def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[]):
     """Calculate local background ratio for every chamber.
 
-    Parameters
-    ----------
-    squeeze_mm : pandas dataframe
-        dataframe containing squeeze data
-    sq_merged : pandas dataframe
-        dataframe containing squeeze data
+    Parameters:
+    squeeze_mm (pandas dataframe): dataframe containing squeeze data
+    sq_merged (pandas dataframe): dataframe containing merged squeeze data
+    device_rows (int): number of rows in device
+    exclude_concs (list): list of concentrations to exclude from local background calculation
 
-    Returns
-    -------
-    squeeze_mm : pandas dataframe
-        dataframe containing squeeze data
+    Returns:
+    squeeze_mm (pandas dataframe): dataframe containing squeeze data with local background ratio added
     """
 
     # get set of substrate concs
@@ -998,7 +981,7 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
 
 
 # ==========================================================================================
-# PDF OUTPUT
+# PLOTTING FUNCTIONS
 # ==========================================================================================
 
 # plot progress curves in PDF output file
@@ -1106,6 +1089,9 @@ def heatmap(data, ax=None, norm=None,
 
     return im, cbar
 
+# ==========================================================================================
+# COMPLETE SUMMARY PLOTTING FUNCTION
+# ==========================================================================================
 
 # main function to plot progress curves, heatmap, and chamber descriptors for experiment
 def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, pbp_conc, substrate, starting_chamber=None, exclude_concs=[]):
@@ -1271,13 +1257,13 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                 vmax_fit = export_mm_df.iloc[0].vmax_fit
 
                 # plot points
-                t = np.arange(0, 100, 0.2)
-                fit_ydata = v_mm_func(t, *[KM_fit, vmax_fit])
-                ax_mm_curve.plot(xdata, ydata, 'bo', label='data')
-                ax_mm_curve.axhline(vmax_fit, label='$v_{max}$')
+                t = np.arange(0, max(xdata), 0.2) # x range for plotting
+                fit_ydata = v_mm_func(t, *[KM_fit, vmax_fit]) # get y values from fit function
+                ax_mm_curve.plot(xdata, ydata, 'bo', label='data') # plot data points
+                ax_mm_curve.axhline(vmax_fit, label='$v_{max}$') # plot vmax line
 
                 # calculate R2 value with np function
-                r2 = np.corrcoef(xdata, ydata)[0, 1]**2
+                r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2
                 
                 # plot michaelis-menten curve fit
                 ax_mm_curve.plot(t, fit_ydata, 'g--', label='MM Fit \n$R^2$: %.3f' % r2)
@@ -1317,7 +1303,7 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                 table_df.apply(pd.to_numeric, errors='ignore', downcast='float')
                 table_df = table_df.round(decimals=3)
 
-                table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Indices', '[E] (nM)', 'eGFP Flag', 'Local BG Ratio', '$k_{cat}$', '$K_M$', '$k_{cat}/K_M$ ($M^{-1} s^{-1}$)'])
+                table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Indices', '[E] (nM)', 'eGFP Flag', 'Local BG Ratio', '$k_{cat}$', '$K_M$ (uM)', '$k_{cat}/K_M$ ($M^{-1} s^{-1}$)'])
                 table.auto_set_font_size(True)
                 table.scale(0.3, 2)
                 table.auto_set_column_width(col=list(range(len(table_df.columns))))
@@ -1337,6 +1323,17 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
 
 # merge all pdfs into one
 def merge_pdfs(export_path_root, substrate, experimental_day):
+    """
+    Merges all pdfs in the export_path_root/PDF/pages/ directory into one pdf file.
+    
+    Parameters:
+    export_path_root (str): path to the directory containing the PDF directory
+    substrate (str): name of the substrate
+    experimental_day (str): date of the experiment
+
+    Returns:
+    None
+    """
 
     # set path
     mypath = export_path_root + '/PDF/'
@@ -1380,34 +1377,18 @@ def export_data(sq_merged, squeeze_mm, export_path_root, experimental_day, setup
 
     Parameters
     ----------
-    sq_merged : pandas.DataFrame
-        Dataframe containing all data from the squeeze analysis.
-
-    squeeze_mm : pandas.DataFrame
-        Dataframe containing all data from Michaelis-Menten analysis.
-
-    export_path_root : str
-        Path to export directory.
-
-    experimental_day : str
-        Experimental day.
-
-    setup : str
-        Microscopy setup numer.
-
-    device : str
-        Device number corresponding to the manifold used on the microscopy setup.
-
-    substrate : str
-        Substrate used in the experiment.
-
-    experiment_name : str
-        Description of the experiment.
+    sq_merged (pandas.DataFrame): Dataframe containing all data from the squeeze analysis.
+    squeeze_mm (pandas.DataFrame): Dataframe containing all data from the Michaelis-Menten curve fits.
+    export_path_root (str): Path to the folder where the csv will be exported.
+    experimental_day (str): Experimental day.
+    setup (str): Microscopy setup.
+    device (str): Device number on manifold.
+    substrate (str): Substrate name.
+    experiment_name (str): Experiment name.
 
     Returns
     -------
     None
-
     """
 
     # generate export dataframe
