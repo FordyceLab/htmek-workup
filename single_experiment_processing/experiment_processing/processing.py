@@ -413,7 +413,7 @@ def imagearray_to_bytearr(img_arr, format = 'png'):
     """
     rescaled_image = np.interp(x = img_arr, 
                                xp = (img_arr.min(), img_arr.max()), 
-                               fp = (0, 10**6.5)
+                               fp = (0, 10**5) # 10**5 is the maximum value that can be displayed in the widget
                                ).astype(np.uint32)
     img_byte_buffer = io.BytesIO()
     pil_img = Image.fromarray(rescaled_image)
@@ -1094,7 +1094,7 @@ def heatmap(data, ax=None, norm=None,
 # ==========================================================================================
 
 # main function to plot progress curves, heatmap, and chamber descriptors for experiment
-def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, pbp_conc, substrate, starting_chamber=None, exclude_concs=[]):
+def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, filter_dictionary, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, pbp_conc, substrate, starting_chamber=None, exclude_concs=[]):
 
     # create export directory
     newpath = export_path_root + '/PDF/pages/'
@@ -1114,7 +1114,7 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
     ax_conc_heatmap = plt.subplot2grid((5, 6), (0, 0), rowspan=2, colspan=2) # enzyme concentration heatmap
     ax_kinetic_heatmap = plt.subplot2grid((5, 6), (0, 2), rowspan=2, colspan=2) # enzyme concentration heatmap
     ax_egfp_hist = plt.subplot2grid((5, 6), (0, 4), rowspan=2, colspan=2) # enzyme concentration heatmap
-
+    ax_filter_table = plt.subplot2grid((5, 6), (2, 0), rowspan=1, colspan=2) # enzyme concentration heatmap
 
     ## Heatmap plotting ============================================================
     # fill NaN
@@ -1161,14 +1161,29 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
     all_blanks = sq_merged[sq_merged['MutantID'] == 'BLANK'][[ "Indices", 'MutantID', 'EnzymeConc']].drop_duplicates(subset=['Indices'], keep='first')
     all_library = sq_merged[sq_merged['MutantID'] != 'BLANK'][[ "Indices", 'MutantID', 'EnzymeConc']].drop_duplicates(subset=['Indices'], keep='first')
 
-    # plot histograms
-    n, bins, patches = plt.hist(all_blanks['EnzymeConc'], stacked=True, bins=30, facecolor='grey', alpha=0.3, edgecolor='black')
-    n, bins, patches = plt.hist(all_library['EnzymeConc'], stacked=True, bins=30, facecolor='green', alpha=0.3, edgecolor='green')
+    # plot histograms, with blank in light grey and library in light green. Add outlines
+    ax_egfp_hist.hist(all_library['EnzymeConc'], bins=20, alpha=0.5, label='Library', color='green', edgecolor='black', linewidth=1.2)
+    ax_egfp_hist.hist(all_blanks['EnzymeConc'], bins=20, alpha=0.5, label='Blank', color='grey', edgecolor='black', linewidth=1.2)
 
     # set plot 
     ax_egfp_hist.set_xlabel('eGFP Concentration (uM)')
     ax_egfp_hist.set_ylabel('Count')
     ax_egfp_hist.set_title('eGFP concentration \n in blank chambers')
+
+
+    ## Filter Table plotting ============================================================
+    # create filter table, including a label for each filter
+    filter_table = pd.DataFrame.from_dict(filter_dictionary, orient='index', columns=['Value'])
+    filter_table['Filter'] = filter_table.index
+    filter_table = filter_table.reset_index(drop=True)
+    filter_table = filter_table[['Filter', 'Value']]
+    filter_table = filter_table.sort_values(by=['Value'], ascending=False)
+
+    # plot filter table
+    ax_filter_table.axis('off')
+    ax_filter_table.axis('tight')
+    ax_filter_table.table(cellText=filter_table.values, colLabels=filter_table.columns, loc='center')
+
 
     plt.savefig(newpath + '00_Chip_Summary.pdf')
     plt.show()
@@ -1310,6 +1325,13 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, squeeze_kinetics
                 ax_table.set_title(export_kinetic_df.iloc[0].MutantID)
                 ax_table.set_axis_off()
                 ax_table.set_frame_on(False)
+
+                # if value is below the filter threshold from the filter_dict, set the corresponding column color to light red
+                filter_dictionary = {'local_bg_ratio': 1.5, 'EnzymeConc': 0.1}
+                for key, value in filter_dictionary.items():
+                    for row in range(len(table_df)):
+                        if table_df.iloc[row][key] < value:
+                            table[(row+1, table_df.columns.get_loc(key))].set_facecolor('#ffcccc')
 
                 # update progress bar
                 pbar.update(1)
