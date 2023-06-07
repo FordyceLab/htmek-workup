@@ -19,12 +19,14 @@ from matplotlib.gridspec import GridSpec
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from itertools import groupby
 import matplotlib.patches as mpatches
+from matplotlib.lines import Line2D
 
 # stats
 from scipy.optimize import curve_fit
 from scipy import optimize, interpolate
 from scipy import stats
 import scipy as scp
+from decimal import Decimal # scientific notation
 
 # symbolic math
 import sympy as sy
@@ -509,11 +511,11 @@ def manual_culling(sq_merged, egfp_button_summary_image_path, NUM_ROWS, NUM_COLS
         print('Culling record found: %s. \nLoaded culling record.' % culling_filepath_abbrev)
 
         # get expression values from all chambers
-        all_chambers_expression = sq_merged[[ "Indices", 'MutantID', 'EnzymeConc']].drop_duplicates(subset=['Indices'], keep='first')
+        all_chambers_expression = sq_merged[[ "Indices", 'MutantID', 'EnzymeConc']].drop_duplicates(subset=['Indices'], keep='first') # removes duplicate enzyme concentrations from the same chamber
 
         # get Indices from all chambers
-        concs_Indices = all_chambers_expression.loc[all_chambers_expression.EnzymeConc > 0][['EnzymeConc','Indices']].sort_values('EnzymeConc', ascending = False).to_numpy().tolist()
-        Indices_to_visualize = [(enzyme_conc, tuple([int(i) for i in i.split(',')])) for enzyme_conc, i in concs_Indices]
+        concs_Indices = all_chambers_expression.loc[all_chambers_expression.EnzymeConc > 0][['EnzymeConc','Indices']].sort_values('EnzymeConc', ascending = False).to_numpy().tolist() # sort by enzyme concentration, descending
+        Indices_to_visualize = [(enzyme_conc, tuple([int(i) for i in i.split(',')])) for enzyme_conc, i in concs_Indices] # convert Indices to tuple of ints
 
         # create button array
         button_img_arr = np.asarray(Image.open(egfp_button_summary_image_path))
@@ -611,7 +613,6 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
     elif culling_record_exists == False:
         # reformat each item in flagged set to add leading zeros
         flagged_set = set(['%02d,%02d' % (int(i.split(',')[0]), int(i.split(',')[1])) for i in flagged_set])
-        
         print('Creating new culling record for the flagged chambers: %s' % str(flagged_set))
 
         # create new column in sq_merged to store culling status based on flagged set
@@ -622,6 +623,9 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
         culling_export_filepath = os.path.join(culling_export_directory, 'manual_culling_record.csv')
         sq_merged.sort_values(['x', 'y',  'MutantID', 'substrate_conc_uM', 'egfp_manual_flag']).to_csv(culling_export_filepath, index=False)
         print('Saved culling record to %s' % culling_export_filepath)
+    
+    # replace nan in egfp_manual_flag column with False
+    sq_merged['egfp_manual_flag'] = sq_merged['egfp_manual_flag'].fillna(False)
 
     return sq_merged
 
@@ -801,13 +805,12 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
     # define curve fit function
     def fit_mm_curve(df, exclude_concs=exclude_concs):
 
-        # store data
+        # define data
         xdata = df.substrate_concs
         ydata = df.initial_rates
         enzyme_conc = df.EnzymeConc
-        name = df.MutantID
 
-        # now, exclude substrate concentrations from fit if needed
+        # exclude substrate concentrations from fit if needed
         if exclude_concs != None:
             for conc in exclude_concs:
                 if conc in xdata:
@@ -820,7 +823,12 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
 
         # perform curve fit
         try:
-            mm_params, pcov = optimize.curve_fit(mm_func, xdata=xdata_final, ydata=ydata_final, bounds=([0, 0], [np.inf, np.inf]))
+            # define KM bounds
+            KM_min = min(xdata_final)*0.5 # set lower bound to 0.5 times the minimum substrate concentration
+            KM_max = max(xdata_final)*1.5 # set upper bound to 1.5 times the maximum substrate concentration
+
+            # fit curve and get parameters
+            mm_params, pcov = optimize.curve_fit(mm_func, xdata=xdata_final, ydata=ydata_final, bounds=([KM_min, 0], [KM_max, np.inf])) # Km, Vmax
         except:
             mm_params = [np.nan, np.nan]
 
@@ -829,7 +837,7 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
         vmax_fit = mm_params[1] # at this point, in uM per second
         kcat_fit = vmax_fit/(enzyme_conc/1000) # at this point, enzyme conc is in nM, so convert to uM; kcat is in s^-1
         kcat_over_KM_fit = 10**6 * kcat_fit/KM_fit # at this point, kcat in s^-1 and KM in uM, so multiply by 1000000 to give s^-1 * M^-1 
-        r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2
+        r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2 # calculate r^2 value
 
         return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, xdata_final, ydata_final, r2
 
@@ -854,28 +862,64 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
     examples_df = examples_df.reset_index()
 
     # plot subplots
-    fig, axs = plt.subplots(1, num_examples, figsize=(20, 3), sharey=True)
+    fig, axs = plt.subplots(1, num_examples, figsize=(16, 5), sharey=True)
+
+    # initialize maximum vmax for y-axis scaling
+    max_vmax = 0
 
     # iterate 
     for index, row in examples_df.iterrows():
         xdata = row.substrate_concs
         ydata = row.initial_rates
-        enzyme_conc = row.EnzymeConc
         vmax_fit = row.vmax_fit
         KM_fit = row.KM_fit
+
+        # if vmax is greater than current max, update max
+        if vmax_fit > max_vmax:
+            max_vmax = vmax_fit
 
         # plot
         t = np.arange(0, float(max(all_substrate_concs)), float(max(all_substrate_concs))/500)
         axs[index].plot(t, v_mm_func(t, *[KM_fit, vmax_fit]), 'g--')
-        axs[index].plot(xdata, ydata, 'bo', label='data')
+        axs[index].plot(xdata, ydata, 'bo')
         axs[index].axhline(vmax_fit)
-        axs[index].set_ylabel('Initial Rate')
-        axs[index].set_xlabel('[AcP]')
-        axs[index].set_ylim(0, 0.1)
+        axs[index].set_xlabel('Substrate Concentration (uM)')
+
+        # define title
+        name = row.MutantID 
+
+        # if name is too long, split it into two lines
+        if len(row.MutantID) > 25:
+            # find underscore closest to middle of string
+            underscore_indices = [i for i, letter in enumerate(name) if letter == '_']
+            middle_index = int(len(name)/2)
+            closest_index = min(underscore_indices, key=lambda x:abs(x-middle_index))
+
+            # replace underscore with newline
+            name = name[:closest_index] + '\n' + name[closest_index+1:]
+        else:
+            name = row.MutantID
 
         # add title with concentration rounded to 2 decimal places
-        axs[index].set_title(row.MutantID + '\n' + 'Conc:' + str(row.EnzymeConc) + ' nM')
-        axs[index].legend(loc='upper left', fancybox=True, shadow=True)
+        axs[index].set_title('(' + row.Indices + ')' + ' ' + name + '\n' + 'Enz Conc: ' + str(round(row.EnzymeConc, 2)) + ' nM')
+
+        # define legend text, which includes fit parameters and R2 (kcat/KM is in scientific notation)
+        # if kcat/KM is greater than 10**6, convert to scientific notation
+        if row.kcat_over_KM_fit > 10**6:
+            kcat_over_KM_sci = '%.2E' % Decimal(row.kcat_over_KM_fit)
+        else:
+            kcat_over_KM_sci = str(round(row.kcat_over_KM_fit, 2))
+
+        legend_text = '$K_M = $' + str(round(KM_fit, 2)) + ' uM' + '\n' + '$k_{cat} = $' + str(round(row.kcat_fit, 2)) + ' $s^{-1}$' + '\n' + '$k_{cat}/K_M = $' + kcat_over_KM_sci + ' $M^{-1}s^{-1}$' + '\n' + '$R^2 = $' + str(round(row.kcat_over_KM_fit_R2, 2))
+        
+        # add legend text to legend
+        handles = [Line2D([0], [0], color='g', linestyle='--')]
+        axs[index].legend(handles=handles, labels=[legend_text, 'Data'], fancybox=True, shadow=True)    
+
+    # set y-axis limit and plot layout
+    axs[0].set_ylabel('Initial Rate (uM/s)') # only label y-axis for leftmost plot
+    plt.ylim(0, max_vmax*2.5) # set y-axis limit
+    plt.tight_layout()                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
 
     return squeeze_mm
 
@@ -928,7 +972,7 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
     substrate_concs = set(sq_merged.substrate_conc_uM)
 
     # get highest allowed substrate concentration
-    max_acp_conc = max(substrate_concs ^ set(exclude_concs)) # gets maximum value from disjoint of the two sets
+    max_acp_conc = min(substrate_concs ^ set(exclude_concs)) # gets maximum value from disjoint of the two sets
 
     # save this as a df
     local_bg_df = sq_merged[sq_merged['substrate_conc_uM'] == max_acp_conc]
@@ -1320,21 +1364,37 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, filter_dictionar
                 table_df = export_mm_df[['Indices', 'EnzymeConc', 'egfp_manual_flag', 'local_bg_ratio', 'kcat_fit', 'KM_fit', 'kcat_over_KM_fit']]
                 table_df.apply(pd.to_numeric, errors='ignore', downcast='float')
                 table_df = table_df.round(decimals=3)
+                table_df['FilteringOutcome'] = 'Passed' # filtering outcome column
+                filtering_outcome = 'Passed' # default filtering outcome
 
-                table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Indices', '[E] (nM)', 'eGFP Flag', 'Local BG Ratio', '$k_{cat}$', '$K_M$ (uM)', '$k_{cat}/K_M$ ($M^{-1} s^{-1}$)'])
-                table.auto_set_font_size(True)
-                table.scale(0.3, 2)
-                table.auto_set_column_width(col=list(range(len(table_df.columns))))
+                params_table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Indices', '[E] (nM)', 'eGFP Flag', 'Local BG Ratio', '$k_{cat}$', '$K_M$ (uM)', '$k_{cat}/K_M$ ($M^{-1} s^{-1}$)', 'Filtering'])
+                params_table.auto_set_font_size(True)
+                params_table.scale(0.3, 2)
+                params_table.auto_set_column_width(col=list(range(len(table_df.columns))))
                 ax_table.set_title(export_kinetic_df.iloc[0].MutantID)
                 ax_table.set_axis_off()
                 ax_table.set_frame_on(False)
 
+                ## table filtering
                 # if value is below the filter threshold from the filter_dict, set the corresponding column color to light red
-                filter_dictionary = {'local_bg_ratio': 1.5, 'EnzymeConc': 0.1}
                 for key, value in filter_dictionary.items():
                     for row in range(len(table_df)):
-                        if table_df.iloc[row][key] < value:
-                            table[(row+1, table_df.columns.get_loc(key))].set_facecolor('#ffcccc')
+                        if (type(value) == int) or (type(value) == float):
+                            if table_df.iloc[row][key] < value:
+                                params_table[(row+1, table_df.columns.get_loc(key))].set_facecolor('#ffcccc')
+                                filtering_outcome = 'Failed'
+                        else:
+                            if table_df.iloc[row][key] == value:
+                                params_table[(row+1, table_df.columns.get_loc(key))].set_facecolor('#ffcccc')
+                                filtering_outcome = 'Failed'
+
+                # update cell in params table with filtering outcome and change color
+                if filtering_outcome == 'Failed':
+                    params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].get_text().set_text(filtering_outcome)
+                    params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].set_facecolor('#ffcccc')
+                else:
+                    params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].get_text().set_text(filtering_outcome)
+                    params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].set_facecolor('#ccffcc')
 
                 # update progress bar
                 pbar.update(1)
@@ -1345,6 +1405,9 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, filter_dictionar
 
         pbar.set_description("Export complete")
 
+# ====================================================================================================
+# MERGE PDFS
+# ====================================================================================================
 
 # merge all pdfs into one
 def merge_pdfs(export_path_root, substrate, experimental_day):
@@ -1382,11 +1445,14 @@ def merge_pdfs(export_path_root, substrate, experimental_day):
 
     # write merged pdf to file
     print('Writing merged pdf to file...')
-    merger.write(mypath + 'merged_' + substrate + '_' + experimental_day + '.pdf')
+    merged_filename = mypath + 'merged_' + substrate + '_' + experimental_day + '.pdf'
+    merger.write(merged_filename)
     print('Done.')
 
     # close merger
     merger.close()
+
+    return merged_filename
 
 
 # ====================================================================================================
