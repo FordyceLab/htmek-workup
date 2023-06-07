@@ -382,9 +382,8 @@ def create_expanded_button(description, button_style):
     return widgets.Button(description=description, button_style=button_style, layout=widgets.Layout(height='200px', width='200px'))
 
 # Creat action to add chamber index to flagged set if button is clicked
-def capture_button(chamberindex):
-    def on_button_clicked(b):
-        global flagged_set
+def capture_button(chamberindex, flagged_set):
+    def on_button_clicked(b, flagged_set=flagged_set):
         if b['new'] == True:
             flagged_set.add(chamberindex)
             b['new'] = False
@@ -431,15 +430,15 @@ def make_image_pane(imagearr):
             max_height = '80px', max_width = '80px')
 
 # Create button grid for display in widget
-def make_button_grid(button_stamps_subset):
+def make_button_grid(button_stamps_subset, flagged_set):
+
     items1 = []
     for enzymeconc, indices, imagearr in button_stamps_subset:
-        
         chamber_index = str(indices)+' '+str(round(enzymeconc, 1))+' nM'
         tb = create_toggle_button(chamber_index)
         
         record_index_name = str(indices[0])+','+str(indices[1])
-        tb.observe(capture_button(record_index_name), 'value')
+        tb.observe(capture_button(record_index_name, flagged_set), 'value')
         hb = widgets.VBox([tb, make_image_pane(imagearr), widgets.Label('.\n.')], 
                           width='120px', 
                           height = '220px',
@@ -459,6 +458,7 @@ def make_button_grid(button_stamps_subset):
                     min_width='200px',
                     display='flex')
     scrollbox = widgets.Box(items1, layout = box_layout)
+
     return scrollbox
  
 
@@ -537,7 +537,7 @@ def manual_culling(sq_merged, egfp_button_summary_image_path, NUM_ROWS, NUM_COLS
 
         print('No culling record found in export directory. Creating button grid for manual culling...')
 
-        # create empty set to store flagged chambers
+        # create empty set to store flagged chambers and make this set global
         flagged_set = set()
 
         # get expression values from all chambers
@@ -565,7 +565,7 @@ def manual_culling(sq_merged, egfp_button_summary_image_path, NUM_ROWS, NUM_COLS
         button_stamps_subset = [(enzymeconc, key, button_stamps[key]) for enzymeconc, key in Indices_to_visualize]
 
         # create button grid
-        button_grid = make_button_grid(button_stamps_subset=button_stamps_subset)
+        button_grid = make_button_grid(button_stamps_subset=button_stamps_subset, flagged_set=flagged_set)
 
         print('Button grid object created. Please wait for your viewport to render the grid...')
 
@@ -590,7 +590,7 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
     files = os.listdir(culling_export_directory)
 
     # If culling record exists, load it and create a set of flagged chambers
-    culling_record_exists = False
+    culling_record_exists = False # initialize culling record exists flag
     for file in files:
         if 'cull' in file and '.csv' in file:
             culling_filename = file
@@ -609,11 +609,14 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
 
     # If culling record does not exist, create a new one
     elif culling_record_exists == False:
-        print('Creating new culling record.')
+        # reformat each item in flagged set to add leading zeros
+        flagged_set = set(['%02d,%02d' % (int(i.split(',')[0]), int(i.split(',')[1])) for i in flagged_set])
+        
+        print('Creating new culling record for the flagged chambers: %s' % str(flagged_set))
 
         # create new column in sq_merged to store culling status based on flagged set
-        bool_flagged_set = set(sq_merged.loc[sq_merged['Indices'].isin(flagged_set)]['Indices'])
-        sq_merged['egfp_manual_flag'] = sq_merged.Indices.apply(lambda i: i in bool_flagged_set)
+        for i in flagged_set:
+            sq_merged.loc[sq_merged['Indices'] == i, 'egfp_manual_flag'] = True
 
         # save culling record
         culling_export_filepath = os.path.join(culling_export_directory, 'manual_culling_record.csv')
