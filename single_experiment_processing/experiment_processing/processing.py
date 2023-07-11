@@ -497,11 +497,13 @@ def manual_culling(sq_merged, egfp_button_summary_image_path, NUM_ROWS, NUM_COLS
 
         # load culling record
         df = pd.read_csv(culling_export_filepath)
+
+        # locate values of Indices column in rows where egfp_manual_flag is True
         flagged_set = set(df.loc[df['egfp_manual_flag'] == True]['Indices'])
 
         # create button grid
         for i in flagged_set:
-            capture_button(i)
+            capture_button(i, flagged_set=flagged_set)
 
         # Create an abbreviated filepath string to show two levels of parent directories above the culling record
         culling_export_filepath_split = culling_export_filepath.split('/')
@@ -594,20 +596,26 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
     # If culling record exists, load it and create a set of flagged chambers
     culling_record_exists = False # initialize culling record exists flag
     for file in files:
-        if 'cull' in file and '.csv' in file:
-            culling_filename = file
-            culling_record_exists = True
-            break
+        # ignore hidden files
+        if not file.startswith('.'):
+            # if culling record exists, load it
+            if 'cull' in file and '.csv' in file:
+                culling_filename = file
+                culling_record_exists = True
 
     # If culling record exists, load it and create a set of flagged chambers
     if culling_record_exists == True:
         culling_export_filepath = os.path.join(culling_export_directory, culling_filename)
         df = pd.read_csv(culling_export_filepath)
+        # replace NaNs with False
+        df['egfp_manual_flag'] = df['egfp_manual_flag'].fillna(False)
         flagged_set = set(df.loc[df['egfp_manual_flag'] == True]['Indices'])
+        print('Found culling record for the following chambers: %s' % str(flagged_set))
 
         # add flagged chambers to sq_merged
         bool_flagged_set = set(sq_merged.loc[sq_merged['Indices'].isin(flagged_set)]['Indices'])
         sq_merged['egfp_manual_flag'] = sq_merged.Indices.apply(lambda i: i in bool_flagged_set)
+        print('Added flagged chambers to sq_merged.')
 
     # If culling record does not exist, create a new one
     elif culling_record_exists == False:
@@ -1020,9 +1028,15 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
         local_bg_df.loc[index, 'local_bg_ratio'] = lbg_ratio
 
 
-    # add column into sq_merged
-    sq_merged = pd.merge(sq_merged, local_bg_df[["Indices", "local_bg_ratio"]], on="Indices", how="left")
-    squeeze_mm = pd.merge(squeeze_mm, local_bg_df[["Indices", "local_bg_ratio"]], on="Indices", how="right")
+    # add column into sq_merged, but overwrite local_bg_ratio if it already exists
+    if 'local_bg_ratio' in sq_merged.columns:
+        sq_merged = sq_merged.drop(columns=['local_bg_ratio'])
+    sq_merged = pd.merge(sq_merged, local_bg_df[["Indices", "local_bg_ratio"]], on="Indices")
+
+    # add column into squeeze_mm, but overwrite local_bg_ratio if it already exists
+    if 'local_bg_ratio' in squeeze_mm.columns:
+        squeeze_mm = squeeze_mm.drop(columns=['local_bg_ratio'])
+    squeeze_mm = pd.merge(squeeze_mm, local_bg_df[["Indices", "local_bg_ratio"]], on="Indices")
 
     return squeeze_mm, sq_merged
 
@@ -1330,10 +1344,11 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, filter_dictionar
                 # plot michaelis-menten curve fit
                 ax_mm_curve.plot(t, fit_ydata, 'g--', label='MM Fit \n$R^2$: %.3f' % r2)
 
-                # add labels
+                # add labels, title, and legend
                 ax_mm_curve.set_ylabel('$v_i$')
                 ax_mm_curve.set_xlabel('AcP Concentration (uM)')
-                ax_mm_curve.set_ylim([0, max(ydata)*1.2])
+                if max(ydata) > 0:
+                    ax_mm_curve.set_ylim([0, max(ydata)*1.2])
                 ax_mm_curve.set_xlim([-max(set(squeeze_kinetics['substrate_conc_uM']))/20, max(set(squeeze_kinetics['substrate_conc_uM']))])
                 ax_mm_curve.set_title('Michaelis-Menten Curve Fit')
                 ax_mm_curve.legend(loc='lower right', fancybox=True, shadow=True)
@@ -1363,9 +1378,13 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, filter_dictionar
                 ## table plotting ============================================================
                 table_df = export_mm_df[['Indices', 'EnzymeConc', 'egfp_manual_flag', 'local_bg_ratio', 'kcat_fit', 'KM_fit', 'kcat_over_KM_fit']]
                 table_df.apply(pd.to_numeric, errors='ignore', downcast='float')
-                table_df = table_df.round(decimals=3)
+                table_df = table_df.round(decimals=2)
                 table_df['FilteringOutcome'] = 'Passed' # filtering outcome column
                 filtering_outcome = 'Passed' # default filtering outcome
+
+                # if kcat/KM is greater than 10^6, convert to scientific notation
+                if table_df['kcat_over_KM_fit'].max() > 10**6:
+                    table_df['kcat_over_KM_fit'] = table_df['kcat_over_KM_fit'].apply(lambda x: '%.2E' % x)
 
                 params_table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Indices', '[E] (nM)', 'eGFP Flag', 'Local BG Ratio', '$k_{cat}$', '$K_M$ (uM)', '$k_{cat}/K_M$ ($M^{-1} s^{-1}$)', 'Filtering'])
                 params_table.auto_set_font_size(True)
@@ -1423,25 +1442,33 @@ def merge_pdfs(export_path_root, substrate, experimental_day):
     None
     """
 
-    # set path
-    mypath = export_path_root + '/PDF/'
+    # add trailing slash to export_path_root if not present
+    if 'PDF' not in export_path_root:
+        mypath = export_path_root + '/PDF/'
+    elif export_path_root[-1] != '/':
+        mypath = export_path_root + '/'
 
     # store all pdf files in a list
-    all_files = sorted([mypath + 'pages/' + f for f in listdir(mypath + 'pages/') if isfile(join(mypath + 'pages/', f))])
+    all_files = [f for f in listdir(mypath + 'pages/') if isfile(join(mypath + 'pages/', f))]
 
-    # remove files from all_files that are not pdfs containing two indices in the filename
-    for file in all_files:
-        if not file.endswith('.pdf'):
-            all_files.remove(file)
-        elif not re.search(r'\d{2},\d{2}', file):
-            all_files.remove(file)
+    # remove files beginning with '._'
+    all_files = [f for f in all_files if not f.startswith('._')]
+
+    import time
+    # get length of all_files
+    print('Merging %d pdfs...' % len(all_files))
+    time.sleep(1)
 
     # initialize merger
     merger = PyPDF2.PdfFileMerger()
 
     # merge pdfs with tqdm progress bar
     for pdf in tqdm(all_files, desc='Merging PDFs'):
-        merger.append(pdf)
+        # merge pdf
+        try:
+            merger.append(mypath + 'pages/' + pdf)
+        except:
+            print('Could not merge %s' % pdf)
 
     # write merged pdf to file
     print('Writing merged pdf to file...')
