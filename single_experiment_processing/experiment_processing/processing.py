@@ -141,13 +141,15 @@ def squeeze_kinetics(kinetic_data, additional_columns=None):
 
 
 # Squeeze standard dataframe to serialize standard concentrations
-def squeeze_standard(standard_data, remove_concs=None, manual_concs=None):
+def squeeze_standard(standard_data, linear_range, remove_concs=None, manual_concs=None):
     """Squeeze standard dataframe to serialize standard concentrations
     
     Parameters
     ----------
     standard_data : pandas dataframe
         Standard data from the processor script
+    linear_range : list
+        List of linear range concentrations
     
     Returns
     -------
@@ -183,8 +185,8 @@ def squeeze_standard(standard_data, remove_concs=None, manual_concs=None):
         plt.scatter(x=squeeze_standards.standard_concentration_uM[i], y=squeeze_standards.standard_median_intensities[i], c='grey', alpha=0.2)
 
         # add vertical lines to indicate linear regime
-        plt.axvline(x=min_conc, c='red', linestyle='--', alpha=0.5)
-        plt.axvline(x=max_conc, c='red', linestyle='--', alpha=0.5)
+        plt.axvline(x=linear_range[0], c='red', linestyle='--', alpha=0.5)
+        plt.axvline(x=linear_range[1], c='red', linestyle='--', alpha=0.5)
 
         # add title and labels
         plt.title('Standard Curve \n Linear regime in red')
@@ -414,7 +416,7 @@ def imagearray_to_bytearr(img_arr, format = 'png'):
     """
     rescaled_image = np.interp(x = img_arr, 
                                xp = (img_arr.min(), img_arr.max()), 
-                               fp = (0, 10**5) # 10**5 is the maximum value that can be displayed in the widget
+                               fp = (0, 10**6) # 10**6 is the maximum value that can be displayed in the widget; in general, increasing this number will increase the brightness of the image
                                ).astype(np.uint32)
     img_byte_buffer = io.BytesIO()
     pil_img = Image.fromarray(rescaled_image)
@@ -627,6 +629,10 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
         for i in flagged_set:
             sq_merged.loc[sq_merged['Indices'] == i, 'egfp_manual_flag'] = True
 
+        # if culled set is empty, add a column of False values
+        if len(flagged_set) == 0:
+            sq_merged['egfp_manual_flag'] = False
+            
         # save culling record
         culling_export_filepath = os.path.join(culling_export_directory, 'manual_culling_record.csv')
         sq_merged.sort_values(['x', 'y',  'MutantID', 'substrate_conc_uM', 'egfp_manual_flag']).to_csv(culling_export_filepath, index=False)
@@ -639,7 +645,7 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
 
 
 # Get initial rates
-def get_initial_rates(sq_merged, pbp_conc = 30):
+def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
     """
     Parameters:
     sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers.
@@ -652,7 +658,6 @@ def get_initial_rates(sq_merged, pbp_conc = 30):
 
     # define the least-squares algorithm
     def fit_initial_rate_row(row, pbp_conc=pbp_conc):
-
         try:
             substrate_conc = row.substrate_conc_uM
             x, y = row.time_s, row.kinetic_product_concentration_uM
@@ -847,6 +852,16 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
         kcat_over_KM_fit = 10**6 * kcat_fit/KM_fit # at this point, kcat in s^-1 and KM in uM, so multiply by 1000000 to give s^-1 * M^-1 
         r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2 # calculate r^2 value
 
+        # correct infinite MM values to 0
+        if np.isinf(kcat_over_KM_fit):
+            kcat_over_KM_fit = 0
+        
+        if np.isinf(kcat_fit):
+            kcat_fit = 0
+
+        if np.isinf(KM_fit):
+            KM_fit = 0
+
         return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, xdata_final, ydata_final, r2
 
     # apply function and store fit parameters
@@ -1001,9 +1016,14 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
         # get rates for each of neighboring chambers
         lbg_rates = []
 
+
         for tup in lbg_idxs:
-            rate = local_bg_df.loc[local_bg_df['index_tuple'] == tup, 'initial_rate'].iloc[0]
-            
+            # if chamber is in local_bg_df, get rate
+            if tup in local_bg_df['index_tuple'].tolist():
+                rate = local_bg_df.loc[local_bg_df['index_tuple'] == tup, 'initial_rate'].iloc[0]
+            else: # if chamber is not in local_bg_df, rate is 0
+                rate = 0
+                
             # account for zero-slope rates
             if rate != 0:
                 lbg_rates.append(rate)
@@ -1155,7 +1175,7 @@ def heatmap(data, ax=None, norm=None,
 # ==========================================================================================
 
 # main function to plot progress curves, heatmap, and chamber descriptors for experiment
-def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, filter_dictionary, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, pbp_conc, substrate, starting_chamber=None, exclude_concs=[]):
+def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, filter_dictionary, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, pbp_conc, substrate, starting_chamber=None, exclude_concs=[]):
 
     # create export directory
     newpath = export_path_root + '/PDF/pages/'
@@ -1298,60 +1318,89 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, filter_dictionar
                 # define table, mm curve, and pbp std curve subplot2grid objects
                 ax_table = plt.subplot2grid((5, 6), (0, 1), colspan=5) # table
                 ax_mm_curve = plt.subplot2grid((5, 6), (3, 0), rowspan=2, colspan=2) # chamber image
-                ax_pbp_std_curve = plt.subplot2grid((5, 6), (3, 4), rowspan=2, colspan=2) # chamber image
+                ax_std_curve = plt.subplot2grid((5, 6), (3, 4), rowspan=2, colspan=2) # chamber image
 
 
                 ## image plotting ============================================================
                 img_idx = (x, y)
-                ax_image.imshow(button_stamps[img_idx], cmap='gray', vmin=0, vmax=np.max(button_stamps[img_idx]))
+                ax_image.imshow(button_stamps[img_idx], cmap='gray', vmin=0, vmax=10**4.5)
 
 
-                ## PBP std curve fit  ============================================================
-                xdata, ydata = export_standards_df.standard_concentration_uM.values[0], export_standards_df.standard_median_intensities.values[0]
-                chamber_popt = export_standards_df.standard_popt.values[0]
+                ## std curve fit  ============================================================
+                # if export_standards_df is empty, skip this step
+                if export_standards_df.empty == False:
+                    xdata, ydata = export_standards_df.standard_concentration_uM.values[0], export_standards_df.standard_median_intensities.values[0]
+                    chamber_popt = export_standards_df.standard_popt.values[0]
+                else:
+                    xdata, ydata = np.nan, np.nan
+                    chamber_popt = np.nan
 
                 # define the interpolation
                 interp_xdata = np.linspace(-np.min(xdata), np.max(xdata), num=100, endpoint=False)
 
-                # plot
-                if type(chamber_popt) != float: # if fit is successful
-                    ax_pbp_std_curve.plot(xdata, v_isotherm(xdata, *chamber_popt), 'r-', label='Isotherm Fit')
-                    ax_pbp_std_curve.plot(interp_xdata, v_isotherm(interp_xdata, *chamber_popt), color='g', linestyle='dashed', label='interpolation')
-                ax_pbp_std_curve.scatter(xdata, ydata, color='b', s=50, alpha=0.4, label='data')
-                ax_pbp_std_curve.set_ylabel('Intensity')
-                ax_pbp_std_curve.set_xlabel('Pi Concentration (uM)')
-                ax_pbp_std_curve.legend(loc='lower right', shadow=True)
-                ax_pbp_std_curve.set_title('PBP Standard Curve')
+                # if standard type is PBP, plot
+                if standard_type == 'PBP':
+                    if type(chamber_popt) != float: # if fit is successful
+                        ax_std_curve.plot(xdata, v_isotherm(xdata, *chamber_popt), 'r-', label='Isotherm Fit')
+                        ax_std_curve.plot(interp_xdata, v_isotherm(interp_xdata, *chamber_popt), color='g', linestyle='dashed', label='interpolation')
+                    ax_std_curve.scatter(xdata, ydata, color='b', s=50, alpha=0.4, label='data')
+                    ax_std_curve.set_ylabel('Intensity')
+                    ax_std_curve.set_xlabel('Pi Concentration (uM)')
+                    ax_std_curve.legend(loc='lower right', shadow=True)
+                    ax_std_curve.set_title('PBP Standard Curve')
+
+                # if standard type is linear, plot
+                elif standard_type == 'linear':
+                    if type(chamber_popt) != float:
+                        def linear(x, a, b): return a*x + b 
+                        v_linear = np.vectorize(linear)
+                        ax_std_curve.plot(xdata, v_linear(xdata, *chamber_popt), 'r-', label='Linear Fit')
+                        ax_std_curve.plot(interp_xdata, v_linear(interp_xdata, *chamber_popt), color='g', linestyle='dashed', label='interpolation')
+                    ax_std_curve.scatter(xdata, ydata, color='b', s=50, alpha=0.4, label='data')
+                    ax_std_curve.set_ylabel('Intensity')
+                    ax_std_curve.set_xlabel('Product Concentration (uM)')
+                    ax_std_curve.legend(loc='lower right', shadow=True)
+                    ax_std_curve.set_title('Linear Standard Curve')
 
 
                 ## Michaelis-Menten curve plotting ============================================================
-                xdata = export_mm_df.iloc[0].substrate_concs
-                ydata = export_mm_df.iloc[0].initial_rates
-                MutantID = export_mm_df.iloc[0].MutantID
-                Indices = export_mm_df.iloc[0].Indices
-                KM_fit = export_mm_df.iloc[0].KM_fit
-                vmax_fit = export_mm_df.iloc[0].vmax_fit
+                # if df is not empty, plot
+                if export_mm_df.empty == False:
+                    xdata = export_mm_df.iloc[0].substrate_concs
+                    ydata = export_mm_df.iloc[0].initial_rates
+                    MutantID = export_mm_df.iloc[0].MutantID
+                    Indices = export_mm_df.iloc[0].Indices
+                    KM_fit = export_mm_df.iloc[0].KM_fit
+                    vmax_fit = export_mm_df.iloc[0].vmax_fit
 
-                # plot points
-                t = np.arange(0, max(xdata), 0.2) # x range for plotting
-                fit_ydata = v_mm_func(t, *[KM_fit, vmax_fit]) # get y values from fit function
-                ax_mm_curve.plot(xdata, ydata, 'bo', label='data') # plot data points
-                ax_mm_curve.axhline(vmax_fit, label='$v_{max}$') # plot vmax line
+                    # plot points
+                    t = np.arange(0, max(xdata), 0.2) # x range for plotting
+                    fit_ydata = v_mm_func(t, *[KM_fit, vmax_fit]) # get y values from fit function
+                    ax_mm_curve.plot(xdata, ydata, 'bo', label='data') # plot data points
+                    ax_mm_curve.axhline(vmax_fit, label='$v_{max}$') # plot vmax line
 
-                # calculate R2 value with np function
-                r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2
-                
-                # plot michaelis-menten curve fit
-                ax_mm_curve.plot(t, fit_ydata, 'g--', label='MM Fit \n$R^2$: %.3f' % r2)
+                    # calculate R2 value with np function
+                    r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2
+                    
+                    # plot michaelis-menten curve fit
+                    ax_mm_curve.plot(t, fit_ydata, 'g--', label='MM Fit \n$R^2$: %.3f' % r2)
 
-                # add labels, title, and legend
-                ax_mm_curve.set_ylabel('$v_i$')
-                ax_mm_curve.set_xlabel('AcP Concentration (uM)')
-                if max(ydata) > 0:
-                    ax_mm_curve.set_ylim([0, max(ydata)*1.2])
-                ax_mm_curve.set_xlim([-max(set(squeeze_kinetics['substrate_conc_uM']))/20, max(set(squeeze_kinetics['substrate_conc_uM']))])
-                ax_mm_curve.set_title('Michaelis-Menten Curve Fit')
-                ax_mm_curve.legend(loc='lower right', fancybox=True, shadow=True)
+                    # add labels, title, and legend
+                    ax_mm_curve.set_ylabel('$v_i$')
+                    ax_mm_curve.set_xlabel('AcP Concentration (uM)')
+                    if max(ydata) > 0:
+                        ax_mm_curve.set_ylim([0, max(ydata)*1.2])
+                    ax_mm_curve.set_xlim([-max(set(squeeze_kinetics['substrate_conc_uM']))/20, max(set(squeeze_kinetics['substrate_conc_uM']))])
+                    ax_mm_curve.set_title('Michaelis-Menten Curve Fit')
+                    ax_mm_curve.legend(loc='lower right', fancybox=True, shadow=True)
+
+                else:
+                    xdata = [0,0,0,0]
+                    ydata = [0,0,0,0]
+                    MutantID = np.nan
+                    Indices = np.nan
+                    KM_fit = np.nan
+                    vmax_fit = np.nan
 
 
                 ## progress curve plotting ============================================================
@@ -1376,44 +1425,45 @@ def plot_chip_summary(squeeze_mm, sq_merged, squeeze_standards, filter_dictionar
 
 
                 ## table plotting ============================================================
-                table_df = export_mm_df[['Indices', 'EnzymeConc', 'egfp_manual_flag', 'local_bg_ratio', 'kcat_fit', 'KM_fit', 'kcat_over_KM_fit']]
-                table_df.apply(pd.to_numeric, errors='ignore', downcast='float')
-                table_df = table_df.round(decimals=2)
-                table_df['FilteringOutcome'] = 'Passed' # filtering outcome column
-                filtering_outcome = 'Passed' # default filtering outcome
+                if export_mm_df.empty == False:
+                    table_df = export_mm_df[['Indices', 'EnzymeConc', 'egfp_manual_flag', 'local_bg_ratio', 'kcat_fit', 'KM_fit', 'kcat_over_KM_fit']]
+                    table_df.apply(pd.to_numeric, errors='ignore', downcast='float')
+                    table_df = table_df.round(decimals=2)
+                    table_df['FilteringOutcome'] = 'Passed' # filtering outcome column
+                    filtering_outcome = 'Passed' # default filtering outcome
 
-                # if kcat/KM is greater than 10^6, convert to scientific notation
-                if table_df['kcat_over_KM_fit'].max() > 10**6:
-                    table_df['kcat_over_KM_fit'] = table_df['kcat_over_KM_fit'].apply(lambda x: '%.2E' % x)
+                    # if kcat/KM is greater than 10^6, convert to scientific notation
+                    if table_df['kcat_over_KM_fit'].max() > 10**6:
+                        table_df['kcat_over_KM_fit'] = table_df['kcat_over_KM_fit'].apply(lambda x: '%.2E' % x)
 
-                params_table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Indices', '[E] (nM)', 'eGFP Flag', 'Local BG Ratio', '$k_{cat}$', '$K_M$ (uM)', '$k_{cat}/K_M$ ($M^{-1} s^{-1}$)', 'Filtering'])
-                params_table.auto_set_font_size(True)
-                params_table.scale(0.3, 2)
-                params_table.auto_set_column_width(col=list(range(len(table_df.columns))))
-                ax_table.set_title(export_kinetic_df.iloc[0].MutantID)
-                ax_table.set_axis_off()
-                ax_table.set_frame_on(False)
+                    params_table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Indices', '[E] (nM)', 'eGFP Flag', 'Local BG Ratio', '$k_{cat}$', '$K_M$ (uM)', '$k_{cat}/K_M$ ($M^{-1} s^{-1}$)', 'Filtering'])
+                    params_table.auto_set_font_size(True)
+                    params_table.scale(0.3, 2)
+                    params_table.auto_set_column_width(col=list(range(len(table_df.columns))))
+                    ax_table.set_title(export_kinetic_df.iloc[0].MutantID)
+                    ax_table.set_axis_off()
+                    ax_table.set_frame_on(False)
 
-                ## table filtering
-                # if value is below the filter threshold from the filter_dict, set the corresponding column color to light red
-                for key, value in filter_dictionary.items():
-                    for row in range(len(table_df)):
-                        if (type(value) == int) or (type(value) == float):
-                            if table_df.iloc[row][key] < value:
-                                params_table[(row+1, table_df.columns.get_loc(key))].set_facecolor('#ffcccc')
-                                filtering_outcome = 'Failed'
-                        else:
-                            if table_df.iloc[row][key] == value:
-                                params_table[(row+1, table_df.columns.get_loc(key))].set_facecolor('#ffcccc')
-                                filtering_outcome = 'Failed'
+                    ## table filtering
+                    # if value is below the filter threshold from the filter_dict, set the corresponding column color to light red
+                    for key, value in filter_dictionary.items():
+                        for row in range(len(table_df)):
+                            if (type(value) == int) or (type(value) == float):
+                                if table_df.iloc[row][key] < value:
+                                    params_table[(row+1, table_df.columns.get_loc(key))].set_facecolor('#ffcccc')
+                                    filtering_outcome = 'Failed'
+                            else:
+                                if table_df.iloc[row][key] == value:
+                                    params_table[(row+1, table_df.columns.get_loc(key))].set_facecolor('#ffcccc')
+                                    filtering_outcome = 'Failed'
 
-                # update cell in params table with filtering outcome and change color
-                if filtering_outcome == 'Failed':
-                    params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].get_text().set_text(filtering_outcome)
-                    params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].set_facecolor('#ffcccc')
-                else:
-                    params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].get_text().set_text(filtering_outcome)
-                    params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].set_facecolor('#ccffcc')
+                    # update cell in params table with filtering outcome and change color
+                    if filtering_outcome == 'Failed':
+                        params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].get_text().set_text(filtering_outcome)
+                        params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].set_facecolor('#ffcccc')
+                    else:
+                        params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].get_text().set_text(filtering_outcome)
+                        params_table[(row+1, table_df.columns.get_loc('FilteringOutcome'))].set_facecolor('#ccffcc')
 
                 # update progress bar
                 pbar.update(1)
