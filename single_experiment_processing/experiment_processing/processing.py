@@ -211,7 +211,7 @@ def squeeze_standard(standard_data, standard_type, experiment_day, linear_range=
 
 
     # plot random subset of standard data
-    rand_n = 400
+    rand_n = 500
     for i in np.random.randint(0, len(squeeze_standards), rand_n):
         # plot the relationship
         plt.scatter(x=squeeze_standards.standard_concentration_uM[i], y=squeeze_standards.standard_median_intensities[i], c='grey', alpha=0.1)
@@ -220,18 +220,23 @@ def squeeze_standard(standard_data, standard_type, experiment_day, linear_range=
         if linear_range is not None:
             plt.axvline(x=linear_range[0], c='red', linestyle='--', alpha=0.5)
             plt.axvline(x=linear_range[1], c='red', linestyle='--', alpha=0.5)
+        # initialize plot
+        ax = plt.gca()
 
         # add title and labels
         if standard_type.upper() == 'PBP':
             # plot pbp median standard curve
             t = np.linspace(0, max(standard_concentrations), 2000,)
             plt.plot(t, v_isotherm(t, *popt), 'b--', label='fit: A=%5.3f, KD=%5.3f, PS=%5.3f, I_0uMP_i=%5.3f' % tuple(popt))
-            plt.title('%s \n Standard Curves (%s chambers shown) \n %s %s uM' % (experiment_day, rand_n, standard_type.upper(), pbp_conc))
+            plt.title('%s \n Standard Curves \n %s %s uM' % (experiment_day, standard_type.upper(), pbp_conc))
             plt.xlabel('Phosphate Concentration (uM)')
         elif standard_type.upper() == 'LINEAR':
-            plt.title('%s \n Standard Curves (%s chambers shown) \n %s %s uM' % (experiment_day, rand_n, standard_type.upper()))
+            plt.title('%s \n Standard Curves \n %s %s uM' % (experiment_day, standard_type.upper()))
             plt.xlabel('Standard Concentration (uM)')
         plt.ylabel('Median Chamber Intensity (RFU)')
+
+    # add n to plot
+    plt.text(0.9, 0.1, 'n (chambers)=%s' % rand_n, horizontalalignment='right', verticalalignment='center', transform=ax.transAxes, fontsize=14)
 
     # Manually add handles for scatter plots
     handles = [mpatches.Patch(color='grey', label='All-chamber Median Intensities'),
@@ -723,8 +728,8 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
             # "regime 2": 30% of the substrate concentration is greater than 2/3 the concentration of PBP.
             elif 0.3*substrate_conc > (2/3)*pbp_conc: # regime "2"
                 regime = 2
-                x = x[0:2]
-                y = y[0:2]
+                x = x[0:first_third]
+                y = y[0:first_third]
 
             # "regime 3": 30% of the substrate concentration is below 2/3 the concentration of PBP. 
             elif 0.3*substrate_conc < (2/3)*pbp_conc: # regime "3"
@@ -1096,8 +1101,22 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
     # merge exclude concs from squeeze_mm to local_bg_df
     local_bg_df = local_bg_df.merge(squeeze_mm[['Indices', 'exclude_concs']], on='Indices')
 
-    # remove rows that are not the target substrate conc
-    local_bg_df = local_bg_df[local_bg_df['substrate_conc_uM'] == target_substrate_conc]
+    ## Select substrate conc for each local background calculation
+    for index, row in tqdm(local_bg_df.iterrows(), total=len(local_bg_df), desc='Calculating local background ratios...'):
+        # get list of included substrate concs
+        chamber_included_concs = [conc for conc in substrate_concs if conc not in row.exclude_concs]
+
+        # get max included substrate conc
+        max_included_conc = max(chamber_included_concs)
+
+        # put max included conc in new column
+        if target_substrate_conc != None:
+            local_bg_df.loc[index, 'local_bg_substrate_conc'] = max_included_conc
+        else:
+            local_bg_df.loc[index, 'local_bg_substrate_conc'] = target_substrate_conc
+        
+    ## Remove rows from local_bg_df where substrate conc is not the max included conc
+    local_bg_df = local_bg_df[local_bg_df['local_bg_substrate_conc'] == local_bg_df['substrate_conc_uM']]
 
     ## Local background rate calculation
     for index, row in tqdm(local_bg_df.iterrows(), total=len(local_bg_df), desc='Calculating local background rates...'):
@@ -1118,14 +1137,16 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
             if tup in local_bg_df['index_tuple'].tolist():
                 rate = local_bg_df.loc[local_bg_df['index_tuple'] == tup, 'initial_rate'].iloc[0]
             else: # if chamber is not in local_bg_df, rate is 0
-                rate = 0
+                rate = 0.0000001
                 
             # account for zero-slope rates
             if rate != 0:
                 lbg_rates.append(rate)
             else:
-                lbg_rates.append(0)
-                
+                lbg_rates.append(0.0000001) # append near-zero rate to avoid dividing by zero
+
+        # remove negative rates from list
+        lbg_rates = [rate for rate in lbg_rates if rate > 0]
 
         # get average of lbg_rates and calculate ratio
         lbg_avg = np.mean(lbg_rates)
@@ -1140,6 +1161,7 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
         if lbg_ratio < 0:
             lbg_ratio = 0
 
+        print(row.Indices, chamber_rate, lbg_ratio, lbg_rates, lbg_idxs)
         # store ratio in new column
         local_bg_df.loc[index, 'local_bg_ratio'] = lbg_ratio
 
@@ -1147,12 +1169,12 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
     # add column into sq_merged, but overwrite local_bg_ratio if it already exists
     if 'local_bg_ratio' in sq_merged.columns:
         sq_merged = sq_merged.drop(columns=['local_bg_ratio'])
-    sq_merged = pd.merge(sq_merged, local_bg_df[["Indices", "local_bg_ratio"]], on="Indices")
+    sq_merged = pd.merge(sq_merged, local_bg_df[["Indices", "local_bg_ratio", "local_bg_substrate_conc"]], on="Indices")
 
     # add column into squeeze_mm, but overwrite local_bg_ratio if it already exists
     if 'local_bg_ratio' in squeeze_mm.columns:
         squeeze_mm = squeeze_mm.drop(columns=['local_bg_ratio'])
-    squeeze_mm = pd.merge(squeeze_mm, local_bg_df[["Indices", "local_bg_ratio"]], on="Indices")
+    squeeze_mm = pd.merge(squeeze_mm, local_bg_df[["Indices", "local_bg_ratio", "local_bg_substrate_conc"]], on="Indices")
 
     return squeeze_mm, sq_merged
 
@@ -1208,9 +1230,7 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
                 ax.text(0, -0.9, "$V_i$: " + str(round(vi, 5)), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
 
             ax.set_title(str(conc) + ' uM ' + substrate_name)
-            ax.set_box_aspect(1)
-            ax.set_ylim([-10, pbp_conc*1.5])
-
+            ax.set_box_aspect(1)   
 
 # plot heatmap in PDF output file
 def heatmap(data, ax=None, norm=None,
@@ -1271,7 +1291,7 @@ def heatmap(data, ax=None, norm=None,
 # ==========================================================================================
 
 # main function to plot progress curves, heatmap, and chamber descriptors for experiment
-def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, filter_dictionary, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, pbp_conc, substrate, starting_chamber=None, exclude_concs=[]):
+def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, filter_dictionary, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, substrate, pbp_conc=None, starting_chamber=None, exclude_concs=[]):
 
     # create export directory
     newpath = export_path_root + '/PDF/pages/'
@@ -1459,7 +1479,7 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                     ax_std_curve.scatter(xdata, ydata, color='b', s=50, alpha=0.4, label='data')
                     ax_std_curve.set_ylabel('Intensity')
                     ax_std_curve.set_xlabel('Pi Concentration (uM)')
-                    ax_std_curve.legend(loc='lower right', shadow=True)
+                    ax_std_curve.legend(loc='lower right', shadow=True, title='PBP Conc = %s uM' % pbp_conc)
                     ax_std_curve.set_title('PBP Standard Curve')
 
                 # if standard type is linear, plot
