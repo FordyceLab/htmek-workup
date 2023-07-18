@@ -208,6 +208,17 @@ def squeeze_standard(standard_data, standard_type, experiment_day, linear_range=
             popt, pcov = optimize.curve_fit(isotherm, standard_concentrations, all_chambers_median_intensities, bounds=([0, 0, 0, 0], [np.inf, np.inf, np.inf, np.inf])) # A, KD, PS, I_0uMP_i
         except:
             popt = np.nan
+    elif standard_type.upper() == 'LINEAR':
+        # define linear function amd vectorize
+        def linear(x, m, b): return m*x + b
+        v_linear = np.vectorize(linear)
+
+        # define curve fit function
+        # if curve fit fails, return nan
+        try:
+            popt, pcov = optimize.curve_fit(linear, standard_concentrations, all_chambers_median_intensities, bounds=([-np.inf, 0], [np.inf, np.inf])) # m, b
+        except:
+            popt = np.nan
 
 
     # plot random subset of standard data
@@ -231,7 +242,10 @@ def squeeze_standard(standard_data, standard_type, experiment_day, linear_range=
             plt.title('%s \n Standard Curves \n %s %s uM' % (experiment_day, standard_type.upper(), pbp_conc))
             plt.xlabel('Phosphate Concentration (uM)')
         elif standard_type.upper() == 'LINEAR':
-            plt.title('%s \n Standard Curves \n %s %s uM' % (experiment_day, standard_type.upper()))
+            # plot linear median standard curve
+            t = np.linspace(0, max(standard_concentrations), 2000,)
+            plt.plot(t, v_linear(t, *popt), 'b--', label='fit: m=%5.3f, b=%5.3f' % tuple(popt))
+            plt.title('%s \n Standard Curves \n %s uM' % (experiment_day, standard_type.upper()))
             plt.xlabel('Standard Concentration (uM)')
         plt.ylabel('Median Chamber Intensity (RFU)')
 
@@ -239,9 +253,14 @@ def squeeze_standard(standard_data, standard_type, experiment_day, linear_range=
     plt.text(0.9, 0.1, 'n (chambers)=%s' % rand_n, horizontalalignment='right', verticalalignment='center', transform=ax.transAxes, fontsize=14)
 
     # Manually add handles for scatter plots
-    handles = [mpatches.Patch(color='grey', label='All-chamber Median Intensities'),
-                mpatches.Patch(color='b', label='Universal Median Fit: \n A=%5.3f, \n KD=%5.3f, \n PS=%5.3f, \n I_0uMP_i=%5.3f' % tuple(popt))
-               ]
+    if standard_type.upper() == 'PBP':
+        handles = [mpatches.Patch(color='grey', label='All-chamber Median Intensities'),
+                    mpatches.Patch(color='b', label='Universal Median Fit: \n A=%5.3f, \n KD=%5.3f, \n PS=%5.3f, \n I_0uMP_i=%5.3f' % tuple(popt))
+                ]
+    if standard_type.upper() == 'LINEAR':
+        handles = [mpatches.Patch(color='grey', label='All-chamber Median Intensities'),
+                    mpatches.Patch(color='b', label='Universal Median Fit: \n m=%5.3f, \n b=%5.3f' % tuple(popt))
+                ]
     
     if linear_range is not None:
         handles.append(mpatches.Patch(color='red', label='Linear Range'))
