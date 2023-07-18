@@ -11,6 +11,7 @@ import seaborn as sns
 import numpy as np
 import re
 import bisect
+import copy
 
 # plotting
 import matplotlib 
@@ -141,15 +142,23 @@ def squeeze_kinetics(kinetic_data, additional_columns=None):
 
 
 # Squeeze standard dataframe to serialize standard concentrations
-def squeeze_standard(standard_data, linear_range, remove_concs=None, manual_concs=None):
+def squeeze_standard(standard_data, standard_type, experiment_day, linear_range=None, pbp_conc=None, remove_concs=None, manual_concs=None):
     """Squeeze standard dataframe to serialize standard concentrations
     
     Parameters
     ----------
     standard_data : pandas dataframe
         Standard data from the processor script
+    standard_type : str
+        Type of standard (linear or PBP)
+    standard_conc : float or int
+        Standard concentration
     linear_range : list
         List of linear range concentrations
+    experiment_day : str
+        Experiment day
+    remove_concs : list
+        List of concentrations to remove
     
     Returns
     -------
@@ -176,26 +185,63 @@ def squeeze_standard(standard_data, linear_range, remove_concs=None, manual_conc
         squeeze_standards['standard_concentration_uM'] = squeeze_standards['standard_concentration_uM'].apply(lambda x: [i for j, i in enumerate(x) if j not in positions])
         squeeze_standards['standard_median_intensities'] = squeeze_standards['standard_median_intensities'].apply(lambda x: [i for j, i in enumerate(x) if j not in positions])
 
-    # define linear range of standard curve
-    min_conc = 1 # 1 to 50 uM 
-    max_conc = 50 # 1 to 50 uM
+    # get list of standard concentrations
+    standard_concentrations = squeeze_standards.standard_concentration_uM.iloc[0]
 
-    for i in np.random.randint(0, len(squeeze_standards), 120):
+    # get list containing the median intensity for each standard concentration
+    all_chambers_median_intensities = []
+    for n, i in enumerate(standard_concentrations):
+        curr_median_intensity = (np.median([x[n] for x in squeeze_standards.standard_median_intensities]))
+        all_chambers_median_intensities.append(curr_median_intensity)
+
+
+    # fit isotherm to the median data
+    if standard_type.upper() == 'PBP':
+        # define pbp isotherm function amd vectorize
+        def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
+        v_isotherm = np.vectorize(isotherm)
+
+        # define curve fit function
+        # excluded high concentration
+        # # if curve fit fails, return nan
+        try:
+            popt, pcov = optimize.curve_fit(isotherm, standard_concentrations, all_chambers_median_intensities, bounds=([0, 0, 0, 0], [np.inf, np.inf, np.inf, np.inf])) # A, KD, PS, I_0uMP_i
+        except:
+            popt = np.nan
+
+
+    # plot random subset of standard data
+    rand_n = 400
+    for i in np.random.randint(0, len(squeeze_standards), rand_n):
         # plot the relationship
-        plt.scatter(x=squeeze_standards.standard_concentration_uM[i], y=squeeze_standards.standard_median_intensities[i], c='grey', alpha=0.2)
+        plt.scatter(x=squeeze_standards.standard_concentration_uM[i], y=squeeze_standards.standard_median_intensities[i], c='grey', alpha=0.1)
 
         # add vertical lines to indicate linear regime
-        plt.axvline(x=linear_range[0], c='red', linestyle='--', alpha=0.5)
-        plt.axvline(x=linear_range[1], c='red', linestyle='--', alpha=0.5)
+        if linear_range is not None:
+            plt.axvline(x=linear_range[0], c='red', linestyle='--', alpha=0.5)
+            plt.axvline(x=linear_range[1], c='red', linestyle='--', alpha=0.5)
 
         # add title and labels
-        plt.title('Standard Curve \n Linear regime in red')
-        plt.xlabel('Standard Concentration (uM)')
-        plt.ylabel('Median Standard Chamber Intensity (RFU)')
+        if standard_type.upper() == 'PBP':
+            # plot pbp median standard curve
+            t = np.linspace(0, max(standard_concentrations), 2000,)
+            plt.plot(t, v_isotherm(t, *popt), 'b--', label='fit: A=%5.3f, KD=%5.3f, PS=%5.3f, I_0uMP_i=%5.3f' % tuple(popt))
+            plt.title('%s \n Standard Curves (%s chambers shown) \n %s %s uM' % (experiment_day, rand_n, standard_type.upper(), pbp_conc))
+            plt.xlabel('Phosphate Concentration (uM)')
+        elif standard_type.upper() == 'LINEAR':
+            plt.title('%s \n Standard Curves (%s chambers shown) \n %s %s uM' % (experiment_day, rand_n, standard_type.upper()))
+            plt.xlabel('Standard Concentration (uM)')
+        plt.ylabel('Median Chamber Intensity (RFU)')
 
     # Manually add handles for scatter plots
-    handles = [mpatches.Patch(color='grey', label='Standard Curve'), mpatches.Patch(color='red', label='Linear Regime')]
-    plt.legend(fancybox=True, framealpha=1, shadow=True, borderpad=1, handles=handles, loc='lower right')
+    handles = [mpatches.Patch(color='grey', label='All-chamber Median Intensities'),
+                mpatches.Patch(color='b', label='Universal Median Fit: \n A=%5.3f, \n KD=%5.3f, \n PS=%5.3f, \n I_0uMP_i=%5.3f' % tuple(popt))
+               ]
+    
+    if linear_range is not None:
+        handles.append(mpatches.Patch(color='red', label='Linear Range'))
+    
+    plt.legend(fancybox=True, framealpha=1, shadow=True, borderpad=1, handles=handles, bbox_to_anchor=(1.05, 1), loc='upper left')
 
     display(squeeze_standards.head(4))
 
@@ -220,7 +266,7 @@ def standard_curve_fit(squeeze_standards, standard_type, manual_concs=None):
     """
 
     # Perform standard curve fitting for pbp coupled reaction
-    if standard_type == 'pbp':
+    if standard_type.upper() == 'PBP':
         # define pbp isotherm function amd vectorize
         def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
         v_func = np.vectorize(isotherm)
@@ -231,7 +277,7 @@ def standard_curve_fit(squeeze_standards, standard_type, manual_concs=None):
 
             # if curve fit fails, return nan
             try:
-                popt, pcov = optimize.curve_fit(isotherm, df.standard_concentration_uM[:-1], df.standard_median_intensities[:-1], bounds=([500, 0, 10, 0], [np.inf, np.inf, np.inf, np.inf])) # A, KD, PS, I_0uMP_i
+                popt, pcov = optimize.curve_fit(isotherm, df.standard_concentration_uM[:-1], df.standard_median_intensities[:-1], bounds=([0, 0, 0, 0], [np.inf, np.inf, np.inf, np.inf])) # A, KD, PS, I_0uMP_i
             except:
                 popt = np.nan
                 
@@ -292,7 +338,7 @@ def standard_curve_fit(squeeze_standards, standard_type, manual_concs=None):
         # if curve fit failed for a particular chamber, skip
         try:
             # finally, define the interpolation
-            interp_xdata = np.linspace(-np.mean(xdata), np.max(xdata), num=100, endpoint=False)
+            interp_xdata = np.linspace(0, np.max(xdata), num=100, endpoint=False)
 
             axs[k].plot(xdata, v_func(xdata, *chamber_popt), 'r-', label='%s curve fit' % standard_type)
             axs[k].plot(interp_xdata, v_func(interp_xdata, *chamber_popt), 'g--', label='interpolation')
@@ -668,17 +714,17 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
             if substrate_conc < pbp_conc: # "regime 1"
                 regime = 1
                 if y[1] >= 0.3*substrate_conc: # fit two points, flag as a two point fit
-                    x = x[1:3]
-                    y = y[1:3]
+                    x = x[0:3]
+                    y = y[0:3]
                 else: # fit first 30% of the series
-                    x = x[1:first_third]
-                    y = y[1:first_third]
+                    x = x[0:first_third]
+                    y = y[0:first_third]
 
             # "regime 2": 30% of the substrate concentration is greater than 2/3 the concentration of PBP.
             elif 0.3*substrate_conc > (2/3)*pbp_conc: # regime "2"
                 regime = 2
-                x = x[1:first_third]
-                y = y[1:first_third]
+                x = x[0:2]
+                y = y[0:2]
 
             # "regime 3": 30% of the substrate concentration is below 2/3 the concentration of PBP. 
             elif 0.3*substrate_conc < (2/3)*pbp_conc: # regime "3"
@@ -751,7 +797,7 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
                 axs[k].plot([0, max(times)], [b, m*max(times)+b], '--')
                 axs[k].set_title(str(v) + substrate)
                 axs[k].set_xlim(0, 2000)
-                axs[k].set_ylim(top=pbp_conc)
+                axs[k].set_ylim(top=pbp_conc*1.5)
                 axs[k].set_xlabel('Time (s)')
             except:
                 axs[k].scatter(times, [0]*len(times), s=10)
@@ -777,7 +823,7 @@ v_mm_func = np.vectorize(mm_func)
 
 
 # fit michaelis-menten equation to the initial rates
-def fit_michaelis_menten(sq_merged, exclude_concs):
+def fit_michaelis_menten(sq_merged, exclude_concs=[]):
     """
     Fits the Michaelis-Menten equation to the initial rates of the progress curves.
 
@@ -807,32 +853,74 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
     # get the substrate concentration list from the first row
     all_substrate_concs = squeeze_mm['substrate_concs'].iloc[0]
 
-    # now, add zero to the beginning of each list of substrate concentrations and initial rates if there is no zero substrate condition
-    if np.min(all_substrate_concs) != 0:
-        squeeze_mm['substrate_concs'] = squeeze_mm['substrate_concs'].apply(lambda x: [0] + x)
-        squeeze_mm['initial_rates'] = squeeze_mm['initial_rates'].apply(lambda x: [0] + x)
 
     # =================================================================================================
     # FIT MICHAELIS-MENTEN EQUATION
 
     # define curve fit function
     def fit_mm_curve(df, exclude_concs=exclude_concs):
+        """
+        Fits the Michaelis-Menten equation to the initial rates of the progress curves. This 
+        function excludes substrate concentrations if they match the following criteria:
+            1. The user specifies to exclude them
+            2. The initial rate is negative
+            3. The initial rate is approximately non-increasing from the previous substrate concentration
+
+        Parameters:
+        df (pandas dataframe): Contains kinetic and standard data for all chambers,
+                                with initial rates calculated.
+        exclude_concs (list): List of substrate concentrations to exclude from the fit.
+
+        Returns:
+        df (pandas dataframe): Contains kinetic and standard data for all chambers,
+                                with initial rates calculated and Michaelis-Menten
+                                fit parameters calculated.
+
+        """
 
         # define data
         xdata = df.substrate_concs
         ydata = df.initial_rates
         enzyme_conc = df.EnzymeConc
 
-        # exclude substrate concentrations from fit if needed
+        ydata_final = copy.copy(ydata)
+        xdata_final = copy.copy(xdata)
+
+        # exclude substrate concentrations from fit
+        exclude_concs = list(set(exclude_concs)) # remove duplicates
         if exclude_concs != None:
             for conc in exclude_concs:
-                if conc in xdata:
-                    conc_index = xdata.index(conc)
+                if conc in xdata_final:
+                    index = xdata_final.index(conc)
+                    xdata_final.pop(index)
+                    ydata_final.pop(index)
 
-                    del xdata[conc_index]
-                    del ydata[conc_index]
-        ydata_final = ydata
-        xdata_final = xdata
+        # exclude substrate concentrations from fit if the initial rate is negative
+        for i, rate in enumerate(ydata_final):
+            if i != 0: # don't exclude the first substrate concentration since this can sometimes be near zero
+                # if rate is not near zero
+                if abs(rate) > 0.001:
+                    if rate < 0:
+                        # append to list of substrate concentrations to exclude
+                        exclude_concs.append(xdata_final[i])
+
+                        # delete the initial rate and substrate concentration from the list
+                        ydata_final.pop(i)
+                        xdata_final.pop(i)
+
+        # exclude substrate concentrations from fit if the initial rate is approximately non-increasing from the previous substrate concentration
+        for i, rate in enumerate(ydata_final):
+            if i != 0:
+                # if current rate is approximately non-increasing from the previous rate
+                if rate < ydata_final[i-1]*0.95:
+                    # append to list of substrate concentrations to exclude
+                    exclude_concs.append(xdata_final[i])
+
+                    # delete the initial rate and substrate concentration from the list
+                    ydata_final.pop(i)
+                    xdata_final.pop(i)
+
+
 
         # perform curve fit
         try:
@@ -850,7 +938,7 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
         vmax_fit = mm_params[1] # at this point, in uM per second
         kcat_fit = vmax_fit/(enzyme_conc/1000) # at this point, enzyme conc is in nM, so convert to uM; kcat is in s^-1
         kcat_over_KM_fit = 10**6 * kcat_fit/KM_fit # at this point, kcat in s^-1 and KM in uM, so multiply by 1000000 to give s^-1 * M^-1 
-        r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2 # calculate r^2 value
+        r2 = np.corrcoef(ydata_final, v_mm_func(xdata_final, *[KM_fit, vmax_fit]))[0, 1]**2 # calculate r^2 value
 
         # correct infinite MM values to 0
         if np.isinf(kcat_over_KM_fit):
@@ -862,7 +950,7 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
         if np.isinf(KM_fit):
             KM_fit = 0
 
-        return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, xdata_final, ydata_final, r2
+        return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, r2, exclude_concs
 
     # apply function and store fit parameters
     print('Fitting Michaelis-Menten curves...')
@@ -873,9 +961,8 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
     squeeze_mm['vmax_fit'] = results.apply(lambda x: x[1])
     squeeze_mm['kcat_fit'] = results.apply(lambda x: x[2])
     squeeze_mm['kcat_over_KM_fit'] = results.apply(lambda x: x[3])
-    squeeze_mm['substrate_concs'] = results.apply(lambda x: x[4])
-    squeeze_mm['initial_rates'] = results.apply(lambda x: x[5])
-    squeeze_mm['kcat_over_KM_fit_R2'] = results.apply(lambda x: x[6])
+    squeeze_mm['kcat_over_KM_fit_R2'] = results.apply(lambda x: x[4])
+    squeeze_mm['exclude_concs'] = results.apply(lambda x: x[5])
 
     # PLOT EXAMPLES
     # select example chambers to plot
@@ -896,17 +983,23 @@ def fit_michaelis_menten(sq_merged, exclude_concs):
         ydata = row.initial_rates
         vmax_fit = row.vmax_fit
         KM_fit = row.KM_fit
+        exclude_concs = row.exclude_concs
 
         # if vmax is greater than current max, update max
         if vmax_fit > max_vmax:
             max_vmax = vmax_fit
 
-        # plot
+        # plot data and curve fit
         t = np.arange(0, float(max(all_substrate_concs)), float(max(all_substrate_concs))/500)
         axs[index].plot(t, v_mm_func(t, *[KM_fit, vmax_fit]), 'g--')
         axs[index].plot(xdata, ydata, 'bo')
         axs[index].axhline(vmax_fit)
         axs[index].set_xlabel('Substrate Concentration (uM)')
+
+        # plot excluded concentrations as grey circles
+        xdata_excluded = [x for x in xdata if x in exclude_concs]
+        ydata_excluded = [ydata[xdata.index(x)] for x in xdata if x in exclude_concs]
+        axs[index].plot(xdata_excluded, ydata_excluded, 'o', color='grey')
 
         # define title
         name = row.MutantID 
@@ -978,7 +1071,7 @@ def get_local_bg_indices(x,y,device_rows):
     return local_bg_indices
 
 # calculate local background ratio for every chamber
-def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[]):
+def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, device_rows):
     """Calculate local background ratio for every chamber.
 
     Parameters:
@@ -994,16 +1087,20 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
     # get set of substrate concs
     substrate_concs = set(sq_merged.substrate_conc_uM)
 
-    # get highest allowed substrate concentration
-    max_acp_conc = min(substrate_concs ^ set(exclude_concs)) # gets maximum value from disjoint of the two sets
-
     # save this as a df
-    local_bg_df = sq_merged[sq_merged['substrate_conc_uM'] == max_acp_conc]
+    local_bg_df = sq_merged.copy()
     local_bg_df['index_tuple'] = local_bg_df.apply(lambda row: (row.x, row.y), axis=1)
     local_bg_df = local_bg_df.reset_index()  # make sure indexes pair with number of rows
     local_bg_df['initial_rate'] = local_bg_df['initial_rate'].round(5)
 
-    for index, row in local_bg_df.iterrows():
+    # merge exclude concs from squeeze_mm to local_bg_df
+    local_bg_df = local_bg_df.merge(squeeze_mm[['Indices', 'exclude_concs']], on='Indices')
+
+    # remove rows that are not the target substrate conc
+    local_bg_df = local_bg_df[local_bg_df['substrate_conc_uM'] == target_substrate_conc]
+
+    ## Local background rate calculation
+    for index, row in tqdm(local_bg_df.iterrows(), total=len(local_bg_df), desc='Calculating local background rates...'):
 
         # store chamber details
         chamber_rate = row.initial_rate
@@ -1015,7 +1112,6 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, device_rows, exclude_concs=[
 
         # get rates for each of neighboring chambers
         lbg_rates = []
-
 
         for tup in lbg_idxs:
             # if chamber is in local_bg_df, get rate
@@ -1113,7 +1209,7 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
 
             ax.set_title(str(conc) + ' uM ' + substrate_name)
             ax.set_box_aspect(1)
-            ax.set_ylim([-10, pbp_conc*1.2])
+            ax.set_ylim([-10, pbp_conc*1.5])
 
 
 # plot heatmap in PDF output file
@@ -1218,11 +1314,14 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
     ax_conc_heatmap.set_yticks([])
     ax_conc_heatmap.set_title('Enzyme Concentration \n by chamber')
 
-    # plot enz LBG
+    # plot enz LBG (shrink large values to 6)
+    max_lbg = 6
     grid_kinetic = grid.pivot('x', 'y', 'local_bg_ratio').T
     grid_kinetic = grid_kinetic[grid_kinetic.columns[::-1]] # flip horizontally
     grid_kinetic = np.array(grid_kinetic)
     display_cbar = True # only display cbar on last grid
+    grid_kinetic[grid_kinetic > max_lbg] = max_lbg
+
     norm = matplotlib.colors.Normalize(vmin=0, vmax=100)
     im, cbar = heatmap(grid_kinetic,
                         cmap="viridis", 
@@ -1231,6 +1330,20 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                         norm=norm,
                         ax=ax_kinetic_heatmap,
                         )
+    
+    # get colorbar tick labels
+    cbar_ticks = cbar.get_ticks()
+    cbar_tick_labels = []
+    for tick in cbar_ticks:
+        if tick == max_lbg:
+            cbar_tick_labels.append('>' + str(max_lbg))
+        else:
+            cbar_tick_labels.append(str(int(tick)))
+
+    # set colorbar tick labels
+    cbar.set_ticks(cbar_ticks)
+    cbar.set_ticklabels(cbar_tick_labels)
+
     ax_kinetic_heatmap.set_xticks([])
     ax_kinetic_heatmap.set_yticks([])
     ax_kinetic_heatmap.set_title('Local BG Ratio \n by chamber')
@@ -1339,7 +1452,7 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                 interp_xdata = np.linspace(-np.min(xdata), np.max(xdata), num=100, endpoint=False)
 
                 # if standard type is PBP, plot
-                if standard_type == 'PBP':
+                if standard_type.upper() == 'PBP':
                     if type(chamber_popt) != float: # if fit is successful
                         ax_std_curve.plot(xdata, v_isotherm(xdata, *chamber_popt), 'r-', label='Isotherm Fit')
                         ax_std_curve.plot(interp_xdata, v_isotherm(interp_xdata, *chamber_popt), color='g', linestyle='dashed', label='interpolation')
@@ -1372,27 +1485,35 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                     Indices = export_mm_df.iloc[0].Indices
                     KM_fit = export_mm_df.iloc[0].KM_fit
                     vmax_fit = export_mm_df.iloc[0].vmax_fit
+                    r2 = export_mm_df.iloc[0].kcat_over_KM_fit_R2
+                    mm_excluded_concs = export_mm_df.iloc[0].exclude_concs
 
-                    # plot points
+                    # subset xdata for points that were excluded from fit, based on mm_excluded_concs
+                    excluded_xdata = [x for x in xdata if x in mm_excluded_concs]
+                    excluded_ydata = [y for x, y in zip(xdata, ydata) if x in mm_excluded_concs]
+                    included_xdata = [x for x in xdata if x not in mm_excluded_concs]
+                    included_ydata = [y for x, y in zip(xdata, ydata) if x not in mm_excluded_concs]
+
+                    # plot points and curve fit
                     t = np.arange(0, max(xdata), 0.2) # x range for plotting
                     fit_ydata = v_mm_func(t, *[KM_fit, vmax_fit]) # get y values from fit function
-                    ax_mm_curve.plot(xdata, ydata, 'bo', label='data') # plot data points
+                    ax_mm_curve.plot(included_xdata, included_ydata, 'o', color='b', label='Fit Data') # plot included points
+                    ax_mm_curve.plot(excluded_xdata, excluded_ydata, 'x', color='grey', label='Excluded (n=%s)' % len(excluded_xdata)) # plot excluded points
                     ax_mm_curve.axhline(vmax_fit, label='$v_{max}$') # plot vmax line
-
-                    # calculate R2 value with np function
-                    r2 = np.corrcoef(ydata, v_mm_func(xdata, *[KM_fit, vmax_fit]))[0, 1]**2
-                    
-                    # plot michaelis-menten curve fit
-                    ax_mm_curve.plot(t, fit_ydata, 'g--', label='MM Fit \n$R^2$: %.3f' % r2)
+                    ax_mm_curve.plot(t, fit_ydata, 'g--', label='MM Fit \n$R^2$: %.3f' % r2) # plot michaelis-menten curve fit
 
                     # add labels, title, and legend
                     ax_mm_curve.set_ylabel('$v_i$')
                     ax_mm_curve.set_xlabel('AcP Concentration (uM)')
                     if max(ydata) > 0:
-                        ax_mm_curve.set_ylim([0, max(ydata)*1.2])
-                    ax_mm_curve.set_xlim([-max(set(squeeze_kinetics['substrate_conc_uM']))/20, max(set(squeeze_kinetics['substrate_conc_uM']))])
+                        # set min to 1/20 of lowest y value at or above 0
+                        miny = -min([y for y in ydata if y > 0])/20
+                        maxy = max(ydata)*1.2
+                        ax_mm_curve.set_ylim([miny, maxy]) # set y axis limits, with some buffer
+                    ax_mm_curve.set_xlim([-max(xdata)/20, max(xdata)*1.2]) # set x axis limits, with some buffer
                     ax_mm_curve.set_title('Michaelis-Menten Curve Fit')
-                    ax_mm_curve.legend(loc='lower right', fancybox=True, shadow=True)
+                    # add legend to the right of the plot
+                    ax_mm_curve.legend(loc='center left', bbox_to_anchor=(1, 0.5), shadow=True, fancybox=True)
 
                 else:
                     xdata = [0,0,0,0]
@@ -1503,6 +1624,8 @@ def merge_pdfs(export_path_root, substrate, experimental_day):
 
     # remove files beginning with '._'
     all_files = [f for f in all_files if not f.startswith('._')]
+
+    print('Found %d pdfs.' % len(all_files))
 
     import time
     # get length of all_files
