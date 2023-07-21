@@ -713,7 +713,77 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
 
     return sq_merged
 
+# define exponential function amd vectorize
+def exponential(t, A, k, y0): 
+    return A*(1-np.exp(-k*t))+y0
+v_exponential = np.vectorize(exponential)
 
+# fit first order exponential 
+def fit_first_order_exponential_row(row):
+    try:
+        # get x and y data
+        xdata, ydata = row.time_s, row.kinetic_product_concentration_uM
+
+        # perform fit
+        popt, pcov = optimize.curve_fit(exponential, xdata, ydata, bounds=([0, 0, -20], [np.inf, 0.05, np.inf])) # A, k, y_0
+    except:
+        popt = [np.nan, np.nan, np.nan]
+    return popt
+
+# define the least-squares algorithm
+def fit_initial_rate_row(row, pbp_conc):
+    try:
+        substrate_conc = row.substrate_conc_uM
+        x, y = row.time_s, row.kinetic_product_concentration_uM
+        # full_x, full_y = x, y 
+        first_third = int(len(x)*0.3)
+        regime = 0
+
+        # "regime 1": the substrate concentration is less than the concentration of PBP.
+        if substrate_conc < pbp_conc: # "regime 1"
+            regime = 1
+            if y[1] >= 0.3*substrate_conc: # fit two points, flag as a two point fit
+                x = x[0:3]
+                y = y[0:3]
+            else: # fit first 30% of the series
+                x = x[0:first_third]
+                y = y[0:first_third]
+
+        # "regime 2": 30% of the substrate concentration is greater than 2/3 the concentration of PBP.
+        elif 0.3*substrate_conc > (1/3)*pbp_conc: # regime "2"
+            regime = 2
+            if len([ y[i] for i in range(len(y)) if y[i] < (1/3)*pbp_conc ]) > 3:
+                # fit only points below 2/3 the concentration of PBP
+                x = [ x[i] for i in range(len(x)) if y[i] < (1/3)*pbp_conc ]
+                y = [ y[i] for i in range(len(y)) if y[i] < (1/3)*pbp_conc ]
+            else:
+                x = x[0:2]
+                y = y[0:2]
+
+
+        # "regime 3": 30% of the substrate concentration is below 2/3 the concentration of PBP. 
+        elif 0.3*substrate_conc < (2/3)*pbp_conc: # regime "3"
+            regime = 3
+            x = x[0:first_third]
+            y = y[0:first_third]
+
+        # reshape the arrays for least-squares regression
+        x = np.array(x)
+        y = np.array(y)
+
+        # perform fit
+        m, c = np.linalg.lstsq(np.vstack([x, np.ones(len(x))]).T, y, rcond=None)[0] # stores initial rate and intercept, the first two objects in the array
+
+        # set two point flag
+        if len(x) == 2:
+            two_point = True
+        else:
+            two_point = False
+            
+        return m, c, two_point, regime
+    except:
+        return np.nan, np.nan, np.nan, np.nan
+        
 # Get initial rates
 def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
     """
@@ -726,57 +796,10 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
                                     with initial rates added.
     """
 
-    # define the least-squares algorithm
-    def fit_initial_rate_row(row, pbp_conc=pbp_conc):
-        try:
-            substrate_conc = row.substrate_conc_uM
-            x, y = row.time_s, row.kinetic_product_concentration_uM
-            # full_x, full_y = x, y 
-            first_third = int(len(x)*0.3)
-            regime = 0
-
-            if substrate_conc < pbp_conc: # "regime 1"
-                regime = 1
-                if y[1] >= 0.3*substrate_conc: # fit two points, flag as a two point fit
-                    x = x[0:3]
-                    y = y[0:3]
-                else: # fit first 30% of the series
-                    x = x[0:first_third]
-                    y = y[0:first_third]
-
-            # "regime 2": 30% of the substrate concentration is greater than 2/3 the concentration of PBP.
-            elif 0.3*substrate_conc > (2/3)*pbp_conc: # regime "2"
-                regime = 2
-                x = x[0:first_third]
-                y = y[0:first_third]
-
-            # "regime 3": 30% of the substrate concentration is below 2/3 the concentration of PBP. 
-            elif 0.3*substrate_conc < (2/3)*pbp_conc: # regime "3"
-                regime = 3
-                x = x[0:first_third]
-                y = y[0:first_third]
-
-            # reshape the arrays for least-squares regression
-            x = np.array(x)
-            y = np.array(y)
-
-            # perform fit
-            m, c = np.linalg.lstsq(np.vstack([x, np.ones(len(x))]).T, y, rcond=None)[0] # stores initial rate and intercept, the first two objects in the array
-
-            # set two point flag
-            if len(x) == 2:
-                two_point = True
-            else:
-                two_point = False
-                
-            return m, c, two_point, regime
-        except:
-            return np.nan, np.nan, np.nan, np.nan
-    
-    # next, store the slope in a new column
+    # calculate the initial rates
     print('Fitting initial rates...')
-    results = sq_merged.apply(fit_initial_rate_row, axis=1)
-    print('Done fitting initial rates. Adding results to dataframe...')
+    results = sq_merged.apply(fit_initial_rate_row, axis=1, pbp_conc=pbp_conc)
+    print('Done fitting initial rates. Adding results to dataframe...\n')
 
     # now add the rates and intercepts to the dataframe
     sq_merged['initial_rate'] = results.apply(lambda x: x[0])
@@ -784,6 +807,15 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
     sq_merged['two_point_fit'] = results.apply(lambda x: x[2])
     sq_merged['rate_fit_regime'] = results.apply(lambda x: x[3])
 
+    # # calculate the exponential fit parameters
+    # print('Fitting exponential parameters...')
+    # results = sq_merged.apply(fit_first_order_exponential_row, axis=1)
+    # print('Done fitting exponential parameters. Adding results to dataframe...\n')
+
+    # # now add the rates and intercepts to the dataframe
+    # sq_merged['exponential_A'] = results.apply(lambda x: x[0])
+    # sq_merged['exponential_kobs'] = results.apply(lambda x: x[1])
+    # sq_merged['exponential_y0'] = results.apply(lambda x: x[2])
 
     ## Plot several initial rates
     print('Plotting progress curves for one random library member...')
@@ -803,42 +835,73 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
     else:
         ncols = 2
 
-    fig, axs = plt.subplots(ncols=ncols, figsize=(10, 3), sharey=True)
+    fig, axs = plt.subplots(ncols=ncols, nrows=2, figsize=(10, 6), sharey=True)
 
     # loop through the concentrations
     for k,v in conc_d.items():
         v_df = my_df[my_df['substrate_conc_uM'] == v]
         v_df = v_df.head(50)
 
-        for index, row in v_df.iterrows():
+        for index, row in tqdm(v_df.iterrows(), total=len(v_df)):
             try:
                 times, product_concs = row['time_s'], row['kinetic_product_concentration_uM']
+
+                # get initial rate and intercept
                 m, b = row.initial_rate, row.initial_rate_intercept
+
+                # # get exponential fit parameters
+                # A, k, y0 = row.exponential_A, row.exponential_kobs, row.exponential_y0
+
+                # get substrate concentration
                 substrate = row.substrate
                 indices = row.Indices
+                # get fit regime
+                regime = row.rate_fit_regime
 
-                axs[k].scatter(times, product_concs, s=10, label=row['substrate'])
-                axs[k].plot([0, max(times)], [b, m*max(times)+b], '--')
-                axs[k].set_title(str(v) + substrate)
-                axs[k].set_xlim(0, 2000)
-                axs[k].set_ylim(top=pbp_conc*1.5)
-                axs[k].set_xlabel('Time (s)')
+                axs[0,k].scatter(times, product_concs, s=10, label=indices)
+                axs[0,k].plot([0, max(times)], [b, m*max(times)+b], '--')
+                axs[0,k].set_title(str(v) + 'uM\n' + substrate, loc='left')
+                axs[0,k].set_xlim(0, 2000)
+                # axs[0,k].set_ylim(top=1.1*max(product_concs))
+                axs[0,k].set_xlabel('Time (s)')
+
+                # print(indices)
+                # axs[k,1].scatter(times, product_concs, s=10, label=indices)
+                # axs[k,1].plot(times, v_exponential(times, A, k, y0), 'r-', label='Exponential Fit')
+                # axs[k,1].set_xlim(0, 2000)
+                # axs[k,1].set_xlabel('Time (s)')
+
             except:
-                axs[k].scatter(times, [0]*len(times), s=10)
-                axs[k].plot([0, max(times)], [b, m*max(times)+b], '--')
-                axs[k].set_title(str(v) + substrate)
-                axs[k].set_xlim(0, 2000)
-                axs[k].set_ylim(top=pbp_conc)
-                axs[k].set_xlabel('Time (s)')
+                times, product_concs = row['time_s'], row['kinetic_product_concentration_uM']
+                substrate = row.substrate
+                axs[0,k].scatter(times, [0]*len(times), s=10)
+                axs[0,k].plot([0, max(times)], [b, m*max(times)+b], '--')
+                axs[0,k].set_title(str(v) + 'uM\n' + substrate, loc='left')
+                axs[0,k].set_xlim(0, 2000)
+                axs[0,k].set_xlabel('Time (s)')
+        
+        ## define coordinates for on top of the right corner of the plot
+        coords = (1, 1)
+        axs[0,k].text(coords[0], coords[1], 'Rate Fit\nRegime: ' + str(regime), transform=axs[0,k].transAxes, horizontalalignment='right', verticalalignment='bottom')
+    
+    # if last plot, add legend
+    if k == len(conc_d)-1:
+        axs[0,k].legend(title='Indices', bbox_to_anchor=(1.05, 1), loc='upper left')
 
     # only set the y label for the first plot
-    axs[0].set_ylabel('Product Concentration (uM)')
+    axs[0,0].set_ylabel('Product Concentration (uM)')
 
-    fig.suptitle("Library Member: " + check, y=1.1)
+    fig.suptitle("Library Member: " + check, y=1.05)
+    plt.tight_layout()
     plt.show()
 
     return sq_merged
 
+
+
+## =================================================================================================
+# MICHAELIS-MENTEN FITTING
+## =================================================================================================
 
 # define michaelis menten equation
 def mm_func(S, Km, Vmax): 
@@ -899,7 +962,6 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
         df (pandas dataframe): Contains kinetic and standard data for all chambers,
                                 with initial rates calculated and Michaelis-Menten
                                 fit parameters calculated.
-
         """
 
         # define data
@@ -907,50 +969,52 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
         ydata = df.initial_rates
         enzyme_conc = df.EnzymeConc
 
+        # create list of substrate concentrations to exclude from fit in this chamber
+        # note: cannot overwrite exclude_concs variable because it is a global variable!
+        chamber_exclude_concs = []
+        chamber_exclude_concs = chamber_exclude_concs + exclude_concs
+
         ydata_final = copy.copy(ydata)
         xdata_final = copy.copy(xdata)
-
-        # exclude substrate concentrations from fit
-        exclude_concs = list(set(exclude_concs)) # remove duplicates
-        if exclude_concs != None:
-            for conc in exclude_concs:
-                if conc in xdata_final:
-                    index = xdata_final.index(conc)
-                    xdata_final.pop(index)
-                    ydata_final.pop(index)
 
         # exclude substrate concentrations from fit if the initial rate is negative
         for i, rate in enumerate(ydata_final):
             if i != 0: # don't exclude the first substrate concentration since this can sometimes be near zero
-                # if rate is not near zero
-                if abs(rate) > 0.001:
-                    if rate < 0:
-                        # append to list of substrate concentrations to exclude
-                        exclude_concs.append(xdata_final[i])
-
-                        # delete the initial rate and substrate concentration from the list
-                        ydata_final.pop(i)
-                        xdata_final.pop(i)
+                if rate < 0:
+                    # append to list of substrate concentrations to exclude
+                    chamber_exclude_concs.append(xdata_final[i])
 
         # exclude substrate concentrations from fit if the initial rate is approximately non-increasing from the previous substrate concentration
         for i, rate in enumerate(ydata_final):
+            # if not the first substrate concentration
             if i != 0:
-                # if current rate is approximately non-increasing from the previous rate
-                if rate < ydata_final[i-1]*0.95:
-                    # append to list of substrate concentrations to exclude
-                    exclude_concs.append(xdata_final[i])
+                # if previous substrate concentration is not in the list of substrate concentrations to exclude
+                # if xdata_final[i-1] not in exclude_concs:
+                # if current rate is approximately non-increasing from the previous included rate
+                if xdata_final[i-1] not in exclude_concs:
+                    if rate < ydata_final[i-1]*0.7:
+                        # append to list of substrate concentrations to exclude
+                        chamber_exclude_concs.append(xdata_final[i])
 
-                    # delete the initial rate and substrate concentration from the list
-                    ydata_final.pop(i)
-                    xdata_final.pop(i)
+                elif xdata_final[i-2] not in exclude_concs:
+                    if rate < ydata_final[i-2]*0.7:
+                        # append to list of substrate concentrations    to exclude
+                        chamber_exclude_concs.append(xdata_final[i])
 
-
+        # exclude substrate concentrations from fit
+        chamber_exclude_concs = list(set(chamber_exclude_concs)) # remove duplicates
+        if chamber_exclude_concs != None:
+            for conc in chamber_exclude_concs:
+                if conc in xdata_final:
+                    # remove from lists without changing order
+                    ydata_final.pop(xdata_final.index(conc))
+                    xdata_final.remove(conc)
 
         # perform curve fit
         try:
             # define KM bounds
-            KM_min = min(xdata_final)*0.5 # set lower bound to 0.5 times the minimum substrate concentration
-            KM_max = max(xdata_final)*1.5 # set upper bound to 1.5 times the maximum substrate concentration
+            KM_min = min(xdata_final)*0.2 # set lower bound to 0.5 times the minimum substrate concentration
+            KM_max = max(xdata_final)*2 # set upper bound to 1.5 times the maximum substrate concentration
 
             # fit curve and get parameters
             mm_params, pcov = optimize.curve_fit(mm_func, xdata=xdata_final, ydata=ydata_final, bounds=([KM_min, 0], [KM_max, np.inf])) # Km, Vmax
@@ -974,7 +1038,7 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
         if np.isinf(KM_fit):
             KM_fit = 0
 
-        return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, r2, exclude_concs
+        return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, r2, chamber_exclude_concs
 
     # apply function and store fit parameters
     print('Fitting Michaelis-Menten curves...')
@@ -1130,9 +1194,9 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
 
         # put max included conc in new column
         if target_substrate_conc != None:
-            local_bg_df.loc[index, 'local_bg_substrate_conc'] = max_included_conc
-        else:
             local_bg_df.loc[index, 'local_bg_substrate_conc'] = target_substrate_conc
+        else:
+            local_bg_df.loc[index, 'local_bg_substrate_conc'] = max_included_conc
         
     ## Remove rows from local_bg_df where substrate conc is not the max included conc
     local_bg_df = local_bg_df[local_bg_df['local_bg_substrate_conc'] == local_bg_df['substrate_conc_uM']]
@@ -1180,7 +1244,6 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
         if lbg_ratio < 0:
             lbg_ratio = 0
 
-        print(row.Indices, chamber_rate, lbg_ratio, lbg_rates, lbg_idxs)
         # store ratio in new column
         local_bg_df.loc[index, 'local_bg_ratio'] = lbg_ratio
 
@@ -1215,10 +1278,14 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
     # create a df of substrate concentrations
     conc_df = df[df['substrate_conc_uM'] == conc]
 
+    # initialize list for all product concentrations
+    all_product_concs = []
+
 
     for index, row in conc_df.iterrows():
 
         times, product_concs = np.array(row['time_s']), row['kinetic_product_concentration_uM']
+        all_product_concs.append(product_concs)
         vi = row['initial_rate']
         intercept = row['initial_rate_intercept']
         regime = row['rate_fit_regime']
@@ -1248,8 +1315,20 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
                 # add initial rate text
                 ax.text(0, -0.9, "$V_i$: " + str(round(vi, 5)), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
 
-            ax.set_title(str(conc) + ' uM ' + substrate_name)
-            ax.set_box_aspect(1)   
+            # add title
+            title_string = str(conc) + ' uM ' + substrate_name
+            # insert \n to break up long titles
+            if len(title_string) > 10:
+                # split title string into two lines
+                title_string = title_string.split('uM')
+                title_string = title_string[0] + 'uM\n' + title_string[1]
+            ax.set_title(title_string)
+            ax.set_box_aspect(1)
+    # # flatten list of all product concentrations
+    # all_product_concs = [item for sublist in all_product_concs for item in sublist]
+
+    # # now set ylims for each ax 
+    # ax.set_ylim(min(all_product_concs), max(all_product_concs)*1.1)
 
 # plot heatmap in PDF output file
 def heatmap(data, ax=None, norm=None,
@@ -1310,7 +1389,8 @@ def heatmap(data, ax=None, norm=None,
 # ==========================================================================================
 
 # main function to plot progress curves, heatmap, and chamber descriptors for experiment
-def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, filter_dictionary, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, experimental_day, experiment_name, substrate, pbp_conc=None, starting_chamber=None, exclude_concs=[]):
+def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, filter_dictionary, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, 
+                      experimental_day, experiment_name, substrate, pbp_conc=None, starting_chamber=None, exclude_concs=[]):
 
     # create export directory
     newpath = export_path_root + '/PDF/pages/'
@@ -1582,6 +1662,21 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                     else:
                         # globals()['ax_progress_curve_' + str(ax)].set_yticks([])
                         plt.setp(globals()['ax_progress_curve_' + str(ax)].get_yticklabels(), visible=False)
+                    
+                # set ylims
+                # get all product concentrations
+                all_product_concs = []
+                for index, row in export_kinetic_df.iterrows():
+                    all_product_concs.append(row['kinetic_product_concentration_uM'])
+
+                # flatten list of all product concentrations
+                all_product_concs = [item for sublist in all_product_concs for item in sublist]
+
+                # now set ylims for each ax
+                for ax, conc in enumerate(sorted(concs)):
+                    globals()['ax_progress_curve_' + str(ax)].set_ylim(min(all_product_concs), max(all_product_concs)*1.1)
+
+                
 
 
                 ## table plotting ============================================================
@@ -1673,6 +1768,14 @@ def merge_pdfs(export_path_root, substrate, experimental_day):
 
     # initialize merger
     merger = PyPDF2.PdfFileMerger()
+
+    # remove summary from all_files for sorting
+    summary = [f for f in all_files if f.startswith('00')]
+    all_files = [f for f in all_files if not f.startswith('00')]
+    # sort all files based on indices of the form: 01,01
+    all_files = sorted(all_files, key=lambda x: int(x.split('.')[0].split(',')[0])*100 + int(x.split('.')[0].split(',')[1]))
+    all_files = summary + all_files
+    print('First three files: %s' % all_files[:3])
 
     # merge pdfs with tqdm progress bar
     for pdf in tqdm(all_files, desc='Merging PDFs'):

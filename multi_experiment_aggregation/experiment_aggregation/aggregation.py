@@ -248,17 +248,20 @@ def get_exponentials(df, conc):
     df = df[df['substrate_conc_uM'] == conc]
 
     # map exponential fit to dataframe
-    opts = df.parallel_apply(map_exponential_fit, axis=1)
+    try:
+        opts = df.parallel_apply(map_exponential_fit, axis=1)
+        df['A'] = opts.apply(lambda x: x[0])
+        df['k_obs'] = opts.apply(lambda x: x[1])
+        df['y0'] = opts.apply(lambda x: x[2])
 
-    df['A'] = opts.apply(lambda x: x[0])
-    df['k_obs'] = opts.apply(lambda x: x[1])
-    df['y0'] = opts.apply(lambda x: x[2])
+        # get R^2 values for each mutant
+        df = df.dropna(subset=['k_obs'])
+        df['Rsq_kobs'] = df.apply(lambda x: r2_score(ast.literal_eval(x.kinetic_product_concentration_uM), 
+                                                    v_exponential(ast.literal_eval(x.time_s), x.A, x.k_obs, x.y0)), axis=1)
+        return df
+        
+    except:
+        return df
 
-    # get R^2 values for each mutant
-    df = df.dropna(subset=['k_obs'])
-    df['Rsq_kobs'] = df.apply(lambda x: r2_score(ast.literal_eval(x.kinetic_product_concentration_uM), 
-                                                 v_exponential(ast.literal_eval(x.time_s), x.A, x.k_obs, x.y0)), axis=1)
-    
-    return df
 
 
