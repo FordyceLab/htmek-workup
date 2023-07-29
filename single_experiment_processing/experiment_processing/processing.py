@@ -724,11 +724,29 @@ def fit_first_order_exponential_row(row):
         # get x and y data
         xdata, ydata = row.time_s, row.kinetic_product_concentration_uM
 
-        # perform fit
-        popt, pcov = optimize.curve_fit(exponential, xdata, ydata, bounds=([0, 0, -20], [np.inf, 0.05, np.inf])) # A, k, y_0
+        # perform fit with max 50 iterations
+        popt, pcov = optimize.curve_fit(exponential, xdata, ydata, bounds=([0, 0, -20], [np.inf, 0.05, 75]), max_nfev=300) # A, k, y0
+
+        # get R^2 of fit
+        Rsq = np.corrcoef(ydata, v_exponential(xdata, *popt))[0,1]**2
+
+        ## finally, get the estimated kcat/KM from kobs
+        # get the enzyme concentration in uM, substrate concentration in uM, and kobs
+        enzyme_conc_uM, substrate_conc_uM, kobs = row.EnzymeConc/1000, row.substrate_conc_uM, popt[1]
+
+        # calculate kcat/KM
+        if enzyme_conc_uM == 0:
+            kobs_kcat_KM = np.nan
+        else:
+            kobs_kcat_KM = kobs/(enzyme_conc_uM * substrate_conc_uM) # in uM^-1 s^-1
+            kobs_kcat_KM = kobs_kcat_KM * 10**6 # in M^-1 s^-1
+
     except:
         popt = [np.nan, np.nan, np.nan]
-    return popt
+        Rsq = np.nan
+        kobs_kcat_KM = np.nan
+
+    return popt, Rsq, kobs_kcat_KM
 
 # define the least-squares algorithm
 def fit_initial_rate_row(row, pbp_conc):
@@ -746,8 +764,8 @@ def fit_initial_rate_row(row, pbp_conc):
                 x = x[0:3]
                 y = y[0:3]
             else: # fit first 30% of the series
-                x = x[0:first_third]
-                y = y[0:first_third]
+                x = x[0:3]
+                y = y[0:3]
 
         # "regime 2": 30% of the substrate concentration is greater than 2/3 the concentration of PBP.
         elif 0.3*substrate_conc > (1/3)*pbp_conc: # regime "2"
@@ -797,7 +815,7 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
     """
 
     # calculate the initial rates
-    print('Fitting initial rates...')
+    print('1) Fitting initial rates...')
     results = sq_merged.apply(fit_initial_rate_row, axis=1, pbp_conc=pbp_conc)
     print('Done fitting initial rates. Adding results to dataframe...\n')
 
@@ -807,15 +825,22 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
     sq_merged['two_point_fit'] = results.apply(lambda x: x[2])
     sq_merged['rate_fit_regime'] = results.apply(lambda x: x[3])
 
-    # # calculate the exponential fit parameters
-    # print('Fitting exponential parameters...')
-    # results = sq_merged.apply(fit_first_order_exponential_row, axis=1)
-    # print('Done fitting exponential parameters. Adding results to dataframe...\n')
+    # calculate the exponential fit parameters
+    print('2) Fitting exponential parameters...')
+    results = sq_merged.parallel_apply(fit_first_order_exponential_row, axis=1)
+    print('Done fitting exponential parameters. Adding results to dataframe...\n')
 
-    # # now add the rates and intercepts to the dataframe
-    # sq_merged['exponential_A'] = results.apply(lambda x: x[0])
-    # sq_merged['exponential_kobs'] = results.apply(lambda x: x[1])
-    # sq_merged['exponential_y0'] = results.apply(lambda x: x[2])
+    # now add the rates and intercepts to the dataframe
+    sq_merged['exponential_A'] = results.apply(lambda x: x[0][0])
+    sq_merged['exponential_kobs'] = results.apply(lambda x: x[0][1])
+    sq_merged['exponential_y0'] = results.apply(lambda x: x[0][2])
+    sq_merged['exponential_R2'] = results.apply(lambda x: x[1])
+    sq_merged['kobs_kcat_KM'] = results.apply(lambda x: x[2])
+
+    return sq_merged
+
+# Plot progress curves
+def plot_progress_curves(sq_merged):
 
     ## Plot several initial rates
     print('Plotting progress curves for one random library member...')
@@ -842,60 +867,78 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc = 30):
         v_df = my_df[my_df['substrate_conc_uM'] == v]
         v_df = v_df.head(50)
 
-        for index, row in tqdm(v_df.iterrows(), total=len(v_df)):
+        for index, row in v_df.iterrows():
             try:
                 times, product_concs = row['time_s'], row['kinetic_product_concentration_uM']
 
                 # get initial rate and intercept
                 m, b = row.initial_rate, row.initial_rate_intercept
 
-                # # get exponential fit parameters
-                # A, k, y0 = row.exponential_A, row.exponential_kobs, row.exponential_y0
+                # get exponential fit parameters
+                A, k_obs, y0 = row.exponential_A, row.exponential_kobs, row.exponential_y0
 
-                # get substrate concentration
+                # get substrate concentration, indices, and fit regime
                 substrate = row.substrate
                 indices = row.Indices
-                # get fit regime
                 regime = row.rate_fit_regime
 
+                # plot progress curves with linear fit
                 axs[0,k].scatter(times, product_concs, s=10, label=indices)
                 axs[0,k].plot([0, max(times)], [b, m*max(times)+b], '--')
                 axs[0,k].set_title(str(v) + 'uM\n' + substrate, loc='left')
                 axs[0,k].set_xlim(0, 2000)
-                # axs[0,k].set_ylim(top=1.1*max(product_concs))
-                axs[0,k].set_xlabel('Time (s)')
+                axs[0,k].set_ylim(top=1.1*max(product_concs))
 
-                # print(indices)
-                # axs[k,1].scatter(times, product_concs, s=10, label=indices)
-                # axs[k,1].plot(times, v_exponential(times, A, k, y0), 'r-', label='Exponential Fit')
-                # axs[k,1].set_xlim(0, 2000)
-                # axs[k,1].set_xlabel('Time (s)')
+                # plot progress curves with exponential fit
+                axs[1,k].scatter(times, product_concs, s=10, label=indices)
+                axs[1,k].plot(times, v_exponential(times, A, k_obs, y0), '--')
+                axs[1,k].set_xlim(0, 2000)
+                axs[1,k].set_ylim(top=1.1*max(product_concs))
+                axs[1,k].set_xlabel('Time (s)')
 
             except:
+                # get initial rate and intercept
                 times, product_concs = row['time_s'], row['kinetic_product_concentration_uM']
                 substrate = row.substrate
-                axs[0,k].scatter(times, [0]*len(times), s=10)
-                axs[0,k].plot([0, max(times)], [b, m*max(times)+b], '--')
+
+                # get exponential fit parameters
+                A, k_obs, y0 = row.exponential_A, row.exponential_kobs, row.exponential_y0
+
+                # get substrate concentration, indices, and fit regime
+                substrate = row.substrate
+                indices = row.Indices
+                regime = row.rate_fit_regime
+
+                # plot progress curves with linear fit
+                axs[0,k].scatter(times, product_concs, s=10, label=indices)
                 axs[0,k].set_title(str(v) + 'uM\n' + substrate, loc='left')
                 axs[0,k].set_xlim(0, 2000)
-                axs[0,k].set_xlabel('Time (s)')
+                axs[0,k].set_ylim(top=1.1*max(product_concs))
+
+                # plot progress curves with exponential fit
+                axs[1,k].scatter(times, product_concs, s=10, label=indices)
+                axs[1,k].plot(times, v_exponential(times, A, k_obs, y0), '--', color='orange')
+                axs[1,k].set_xlim(0, 2000)
+                axs[1,k].set_ylim(top=1.1*max(product_concs))
+                axs[1,k].set_xlabel('Time (s)')
+
         
         ## define coordinates for on top of the right corner of the plot
-        coords = (1, 1)
-        axs[0,k].text(coords[0], coords[1], 'Rate Fit\nRegime: ' + str(regime), transform=axs[0,k].transAxes, horizontalalignment='right', verticalalignment='bottom')
+        coords = (1, 1.01)
+        axs[0,k].text(coords[0], coords[1], 'Linear\nRate Fit\nRegime: ' + str(regime), transform=axs[0,k].transAxes, horizontalalignment='right', verticalalignment='bottom')
+        axs[1,k].text(coords[0], coords[1], 'Exponential Fit', transform=axs[1,k].transAxes, horizontalalignment='right', verticalalignment='bottom')
     
-    # if last plot, add legend
-    if k == len(conc_d)-1:
-        axs[0,k].legend(title='Indices', bbox_to_anchor=(1.05, 1), loc='upper left')
+    # add legend to the last plot
+    axs[0,-1].legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
 
     # only set the y label for the first plot
-    axs[0,0].set_ylabel('Product Concentration (uM)')
+    for ax in axs.flat:
+        ax.set_ylabel('Product Concentration (uM)')
 
+    # add suptitle, tight layout, and show
     fig.suptitle("Library Member: " + check, y=1.05)
     plt.tight_layout()
     plt.show()
-
-    return sq_merged
 
 
 
@@ -934,8 +977,18 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
 
     # first, group by Indices to create initial rate and substrate conc series
     initial_rates = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['initial_rate'].apply(list).reset_index(name='initial_rates')
+    exponential_A = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['exponential_A'].apply(list).reset_index(name='exponential_A')
+    exponential_kobs = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['exponential_kobs'].apply(list).reset_index(name='exponential_kobs')
+    exponential_y0 = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['exponential_y0'].apply(list).reset_index(name='exponential_y0')
+    exponential_R2 = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['exponential_R2'].apply(list).reset_index(name='exponential_R2')
     substrate_concs = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['substrate_conc_uM'].apply(list).reset_index(name='substrate_concs')
+    
+    # merge all of the series into one dataframe
     squeeze_mm = pd.merge(substrate_concs, initial_rates, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
+    squeeze_mm = pd.merge(squeeze_mm, exponential_A, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
+    squeeze_mm = pd.merge(squeeze_mm, exponential_kobs, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
+    squeeze_mm = pd.merge(squeeze_mm, exponential_y0, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
+    squeeze_mm = pd.merge(squeeze_mm, exponential_R2, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
 
     # get the substrate concentration list from the first row
     all_substrate_concs = squeeze_mm['substrate_concs'].iloc[0]
@@ -984,22 +1037,22 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
                     # append to list of substrate concentrations to exclude
                     chamber_exclude_concs.append(xdata_final[i])
 
-        # exclude substrate concentrations from fit if the initial rate is approximately non-increasing from the previous substrate concentration
-        for i, rate in enumerate(ydata_final):
-            # if not the first substrate concentration
-            if i != 0:
-                # if previous substrate concentration is not in the list of substrate concentrations to exclude
-                # if xdata_final[i-1] not in exclude_concs:
-                # if current rate is approximately non-increasing from the previous included rate
-                if xdata_final[i-1] not in exclude_concs:
-                    if rate < ydata_final[i-1]*0.7:
-                        # append to list of substrate concentrations to exclude
-                        chamber_exclude_concs.append(xdata_final[i])
+        # # exclude substrate concentrations from fit if the initial rate is approximately non-increasing from the previous substrate concentration
+        # for i, rate in enumerate(ydata_final):
+        #     # if not the first substrate concentration
+        #     if i != 0:
+        #         # if previous substrate concentration is not in the list of substrate concentrations to exclude
+        #         # if xdata_final[i-1] not in exclude_concs:
+        #         # if current rate is approximately non-increasing from the previous included rate
+        #         if xdata_final[i-1] not in exclude_concs:
+        #             if rate < ydata_final[i-1]*0.7:
+        #                 # append to list of substrate concentrations to exclude
+        #                 chamber_exclude_concs.append(xdata_final[i])
 
-                elif xdata_final[i-2] not in exclude_concs:
-                    if rate < ydata_final[i-2]*0.7:
-                        # append to list of substrate concentrations    to exclude
-                        chamber_exclude_concs.append(xdata_final[i])
+        #         elif xdata_final[i-2] not in exclude_concs:
+        #             if rate < ydata_final[i-2]*0.7:
+        #                 # append to list of substrate concentrations    to exclude
+        #                 chamber_exclude_concs.append(xdata_final[i])
 
         # exclude substrate concentrations from fit
         chamber_exclude_concs = list(set(chamber_exclude_concs)) # remove duplicates
@@ -1024,13 +1077,19 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
         # store variables
         KM_fit = mm_params[0] # at this point, this is in uM
         vmax_fit = mm_params[1] # at this point, in uM per second
-        kcat_fit = vmax_fit/(enzyme_conc/1000) # at this point, enzyme conc is in nM, so convert to uM; kcat is in s^-1
-        kcat_over_KM_fit = 10**6 * kcat_fit/KM_fit # at this point, kcat in s^-1 and KM in uM, so multiply by 1000000 to give s^-1 * M^-1 
-        r2 = np.corrcoef(ydata_final, v_mm_func(xdata_final, *[KM_fit, vmax_fit]))[0, 1]**2 # calculate r^2 value
+        if enzyme_conc != 0:
+            kcat_fit = vmax_fit/(enzyme_conc/1000) # at this point, enzyme conc is in nM, so convert to uM; kcat is in s^-1
+        else:
+            kcat_fit = np.nan
+        MM_kcat_over_KM_fit = 10**6 * (kcat_fit/KM_fit) # at this point, kcat in s^-1 and KM in uM, so multiply by 1000000 to give s^-1 * M^-1 
+        if len(xdata_final) > 1:
+            r2 = np.corrcoef(ydata_final, v_mm_func(xdata_final, *[KM_fit, vmax_fit]))[0, 1]**2 # calculate r^2 value
+        else:
+            r2 = np.nan
 
         # correct infinite MM values to 0
-        if np.isinf(kcat_over_KM_fit):
-            kcat_over_KM_fit = 0
+        if np.isinf(MM_kcat_over_KM_fit):
+            MM_kcat_over_KM_fit = 0
         
         if np.isinf(kcat_fit):
             kcat_fit = 0
@@ -1038,7 +1097,7 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
         if np.isinf(KM_fit):
             KM_fit = 0
 
-        return KM_fit, vmax_fit, kcat_fit, kcat_over_KM_fit, r2, chamber_exclude_concs
+        return KM_fit, vmax_fit, kcat_fit, MM_kcat_over_KM_fit, r2, chamber_exclude_concs
 
     # apply function and store fit parameters
     print('Fitting Michaelis-Menten curves...')
@@ -1048,8 +1107,8 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
     squeeze_mm['KM_fit'] = results.apply(lambda x: x[0])
     squeeze_mm['vmax_fit'] = results.apply(lambda x: x[1])
     squeeze_mm['kcat_fit'] = results.apply(lambda x: x[2])
-    squeeze_mm['kcat_over_KM_fit'] = results.apply(lambda x: x[3])
-    squeeze_mm['kcat_over_KM_fit_R2'] = results.apply(lambda x: x[4])
+    squeeze_mm['MM_kcat_over_KM_fit'] = results.apply(lambda x: x[3])
+    squeeze_mm['MM_kcat_over_KM_fit_R2'] = results.apply(lambda x: x[4])
     squeeze_mm['exclude_concs'] = results.apply(lambda x: x[5])
 
     # PLOT EXAMPLES
@@ -1109,12 +1168,12 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
 
         # define legend text, which includes fit parameters and R2 (kcat/KM is in scientific notation)
         # if kcat/KM is greater than 10**6, convert to scientific notation
-        if row.kcat_over_KM_fit > 10**6:
-            kcat_over_KM_sci = '%.2E' % Decimal(row.kcat_over_KM_fit)
+        if row.MM_kcat_over_KM_fit > 10**6:
+            kcat_over_KM_sci = '%.2E' % Decimal(row.MM_kcat_over_KM_fit)
         else:
-            kcat_over_KM_sci = str(round(row.kcat_over_KM_fit, 2))
+            kcat_over_KM_sci = str(round(row.MM_kcat_over_KM_fit, 2))
 
-        legend_text = '$K_M = $' + str(round(KM_fit, 2)) + ' uM' + '\n' + '$k_{cat} = $' + str(round(row.kcat_fit, 2)) + ' $s^{-1}$' + '\n' + '$k_{cat}/K_M = $' + kcat_over_KM_sci + ' $M^{-1}s^{-1}$' + '\n' + '$R^2 = $' + str(round(row.kcat_over_KM_fit_R2, 2))
+        legend_text = '$K_M = $' + str(round(KM_fit, 2)) + ' uM' + '\n' + '$k_{cat} = $' + str(round(row.kcat_fit, 2)) + ' $s^{-1}$' + '\n' + '$k_{cat}/K_M = $' + kcat_over_KM_sci + ' $M^{-1}s^{-1}$' + '\n' + '$R^2 = $' + str(round(row.MM_kcat_over_KM_fit_R2, 2))
         
         # add legend text to legend
         handles = [Line2D([0], [0], color='g', linestyle='--')]
@@ -1123,7 +1182,15 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
     # set y-axis limit and plot layout
     axs[0].set_ylabel('Initial Rate (uM/s)') # only label y-axis for leftmost plot
     plt.ylim(0, max_vmax*2.5) # set y-axis limit
-    plt.tight_layout()                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+    plt.tight_layout()      
+
+
+    # =================================================================================================
+    # REFORMAT EXPONENTIAL FIT COLUMNS
+    # add "_list" to end of exponential parameter colomn names
+    for col in squeeze_mm.columns:
+        if 'exponential' in col:
+            squeeze_mm = squeeze_mm.rename(columns={col: col + '_list'})                                                                                                                                                                                                                                                                                                                                                                                                                                                              
 
     return squeeze_mm
 
@@ -1190,7 +1257,10 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
         chamber_included_concs = [conc for conc in substrate_concs if conc not in row.exclude_concs]
 
         # get max included substrate conc
-        max_included_conc = max(chamber_included_concs)
+        if len(chamber_included_concs) > 0:
+            max_included_conc = max(chamber_included_concs)
+        else:
+            max_included_conc = np.nan
 
         # put max included conc in new column
         if target_substrate_conc != None:
@@ -1286,34 +1356,48 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
 
         times, product_concs = np.array(row['time_s']), row['kinetic_product_concentration_uM']
         all_product_concs.append(product_concs)
+
+        # get initial rate, intercept, fit regime, and two-point fit boolean
         vi = row['initial_rate']
         intercept = row['initial_rate_intercept']
         regime = row['rate_fit_regime']
         two_point_fit = row['two_point_fit']
 
+        # get exponential fit parameters
+        A, k_obs, y0 = row.exponential_A, row.exponential_kobs, row.exponential_y0
+        exp_R2 = row.exponential_R2
+
         # plot data for the current chamber if it is not NaN
         if type(product_concs) == list:
-            ax.scatter(times, product_concs, **kwargs_for_scatter) # plot progress curve
-            ax.plot(times, (times*vi) + intercept, **kwargs_for_line) # plot initial rate line
-            # ax.set_xticklabels([]) # remove tick labels
 
+            # plot progress curve
+            ax.scatter(times, product_concs, **kwargs_for_scatter) # plot progress curve
+            
+            # plot initial rate line
+            ax.plot(times, (times*vi) + intercept, **kwargs_for_line) # plot initial rate line
+
+            # plot exponential fit
+            ax.plot(times, v_exponential(times, A, k_obs, y0), '--', alpha=0.5)
+
+            # add text for fit descriptors
             if fit_descriptors==True:
 
-                # add regime text
-                ax.text(0, -0.45, "Fit Regime: " + str(regime), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                    
+                # add linear title with underlined text
+                ax.text(0, -0.35, "Lin Fit Regime: " + str(regime), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
 
                 # add two-point fit
                 if two_point_fit == True:
-                    ax.text(0, -0.6, "Two-point: " + str(two_point_fit), color='red', transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                    ax.text(0, -0.5, "Two-point: " + str(two_point_fit), color='red', transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
                 else:
-                    ax.text(0, -0.6, "Two-point: " + str(two_point_fit), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
-                
-                # add MM exclusion text
-                if conc in exclude_concs:
-                    ax.text(0, -0.75, "MM-fit: Held out", transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
-
+                    ax.text(0, -0.5, "Two-point: " + str(two_point_fit), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+            
                 # add initial rate text
-                ax.text(0, -0.9, "$V_i$: " + str(round(vi, 5)), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                ax.text(0, -0.65, "$V_i$: " + str(round(vi, 5)), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+
+                # add exponential fit text
+                ax.text(0, -0.8, "$k_{obs}$: " + str(round(k_obs, 5)), transform=ax.transAxes)
+                ax.text(0, -0.95, "$R^2$: " + str(round(exp_R2, 5)), transform=ax.transAxes)
 
             # add title
             title_string = str(conc) + ' uM ' + substrate_name
@@ -1515,7 +1599,7 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
         start_y = starting_chamber[1]
 
     # initialize tqdm
-    with tqdm(total = device_columns * device_rows) as pbar:
+    with tqdm(total = (device_columns*device_rows) - ((start_x-1)*device_rows + (start_y-1))) as pbar:
 
         # Plot Chamber-wise Summaries
         for x in range(start_x, device_columns + 1, 1):
@@ -1535,7 +1619,7 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
 
 
                 ## defining subplots ============================================================
-                ax_image = plt.subplot2grid((6, 10), (0, 0), colspan=2) # chamber image
+                ax_image = plt.subplot2grid((6, 10), (0, 0), colspan=1) # chamber image
                 
                 # define concentration series
                 concs = set(export_kinetic_df['substrate_conc_uM'])
@@ -1604,7 +1688,7 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                     Indices = export_mm_df.iloc[0].Indices
                     KM_fit = export_mm_df.iloc[0].KM_fit
                     vmax_fit = export_mm_df.iloc[0].vmax_fit
-                    r2 = export_mm_df.iloc[0].kcat_over_KM_fit_R2
+                    r2 = export_mm_df.iloc[0].MM_kcat_over_KM_fit_R2
                     mm_excluded_concs = export_mm_df.iloc[0].exclude_concs
 
                     # subset xdata for points that were excluded from fit, based on mm_excluded_concs
@@ -1670,7 +1754,12 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                     all_product_concs.append(row['kinetic_product_concentration_uM'])
 
                 # flatten list of all product concentrations
-                all_product_concs = [item for sublist in all_product_concs for item in sublist]
+                if len(all_product_concs) == 0:
+                    all_product_concs = [0]
+                elif type(all_product_concs[0]) == list:
+                    all_product_concs = [item for sublist in all_product_concs for item in sublist]
+                elif type(all_product_concs[0]) == float:
+                    all_product_concs = [0]
 
                 # now set ylims for each ax
                 for ax, conc in enumerate(sorted(concs)):
@@ -1681,17 +1770,17 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
 
                 ## table plotting ============================================================
                 if export_mm_df.empty == False:
-                    table_df = export_mm_df[['Indices', 'EnzymeConc', 'egfp_manual_flag', 'local_bg_ratio', 'kcat_fit', 'KM_fit', 'kcat_over_KM_fit']]
+                    table_df = export_mm_df[['Indices', 'EnzymeConc', 'egfp_manual_flag', 'local_bg_ratio', 'kcat_fit', 'KM_fit', 'MM_kcat_over_KM_fit', 'kobs_kcat_over_KM']]
                     table_df.apply(pd.to_numeric, errors='ignore', downcast='float')
                     table_df = table_df.round(decimals=2)
                     table_df['FilteringOutcome'] = 'Passed' # filtering outcome column
                     filtering_outcome = 'Passed' # default filtering outcome
 
                     # if kcat/KM is greater than 10^6, convert to scientific notation
-                    if table_df['kcat_over_KM_fit'].max() > 10**6:
-                        table_df['kcat_over_KM_fit'] = table_df['kcat_over_KM_fit'].apply(lambda x: '%.2E' % x)
+                    if table_df['MM_kcat_over_KM_fit'].max() > 10**6:
+                        table_df['MM_kcat_over_KM_fit'] = table_df['MM_kcat_over_KM_fit'].apply(lambda x: '%.2E' % x)
 
-                    params_table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Indices', '[E] (nM)', 'eGFP Flag', 'Local BG Ratio', '$k_{cat}$', '$K_M$ (uM)', '$k_{cat}/K_M$ ($M^{-1} s^{-1}$)', 'Filtering'])
+                    params_table = ax_table.table(cellText=table_df.values, loc='center', colLabels=['Idx', '[E] (nM)', 'eGFP Flag', 'LBGR', '$k_{cat}$', '$K_M$ (uM)', 'MM $k_{cat}/K_M$ ($M^{-1} s^{-1}$)', '$k_{obs}$ $k_{cat}/K_M$ ($M^{-1} s^{-1}$)', 'Filtering'])
                     params_table.auto_set_font_size(True)
                     params_table.scale(0.3, 2)
                     params_table.auto_set_column_width(col=list(range(len(table_df.columns))))
@@ -1758,6 +1847,9 @@ def merge_pdfs(export_path_root, substrate, experimental_day):
 
     # remove files beginning with '._'
     all_files = [f for f in all_files if not f.startswith('._')]
+
+    # remove nan files
+    all_files = [f for f in all_files if not f.startswith('nan')]
 
     print('Found %d pdfs.' % len(all_files))
 
