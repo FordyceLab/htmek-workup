@@ -715,7 +715,7 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
 
 # define exponential function amd vectorize
 def exponential(t, A, k, y0): 
-    return A*(1-np.exp(-k*t))+y0
+    return A*(np.exp(-k*t))+y0
 v_exponential = np.vectorize(exponential)
 
 # fit first order exponential 
