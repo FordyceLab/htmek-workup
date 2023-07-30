@@ -715,7 +715,7 @@ def handle_flagged_chambers(sq_merged, flagged_set, culling_export_directory):
 
 # define exponential function amd vectorize
 def exponential(t, A, k, y0): 
-    return A*(np.exp(-k*t))+y0
+    return A*(1-np.exp(-k*t))+y0
 v_exponential = np.vectorize(exponential)
 
 # fit first order exponential 
@@ -725,7 +725,7 @@ def fit_first_order_exponential_row(row):
         xdata, ydata = row.time_s, row.kinetic_product_concentration_uM
 
         # perform fit with max 50 iterations
-        popt, pcov = optimize.curve_fit(exponential, xdata, ydata, bounds=([0, 0, -20], [np.inf, 0.05, 75]), max_nfev=300) # A, k, y0
+        popt, pcov = optimize.curve_fit(exponential, xdata, ydata, bounds=([0, 0, -20], [np.inf, 0.05, 75]), max_nfev=500) # A, k, y0
 
         # get R^2 of fit
         Rsq = np.corrcoef(ydata, v_exponential(xdata, *popt))[0,1]**2
@@ -740,6 +740,8 @@ def fit_first_order_exponential_row(row):
         else:
             kobs_kcat_KM = kobs/(enzyme_conc_uM * substrate_conc_uM) # in uM^-1 s^-1
             kobs_kcat_KM = kobs_kcat_KM * 10**6 # in M^-1 s^-1
+            # multiply by A
+            
 
     except:
         popt = [np.nan, np.nan, np.nan]
