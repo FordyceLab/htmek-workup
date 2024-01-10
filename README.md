@@ -1,4 +1,4 @@
-# htmek_processing
+# HTMEKProcessing
 An `.ipynb` interface for HT-MEK data processing.
 
 Summary
