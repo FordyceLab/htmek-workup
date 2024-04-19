@@ -1,5 +1,5 @@
 # HTMEK-workup
-HTMEK-workup provides scripts and an `.ipynb` interface to work up kinetic data from HT-MEK experiments.
+HTMEK-workup provides functions written in python and an `.ipynb` interface to work up kinetic data from HT-MEK experiments.
 
 Summary
 -------
