@@ -1,9 +1,9 @@
 # HTMEK-workup
-HTMEK-workup provides an interactive interface written in Python to work up kinetic data from HT-MEK experiments. Filtering criteria and kinetic fitting methodology are based on [Markin, Mokhtari, et al. 2020](https://www.science.org/doi/10.1126/science.abf8761)
+HTMEK-workup provides an interactive interface written in Python to work up kinetic data from HT-MEK experiments. Filtering criteria and kinetic fitting methodology are based on [Markin, Mokhtari, et al. 2021](https://www.science.org/doi/10.1126/science.abf8761)
 
 Summary
 -------
-This is a python interface for processing HT-MEK data. It is written in python and uses `ipywidgets` elements to provide an interactive interface in a compatible environment (e.g. Jupyter, IDE renderer). The interface is designed to be used with the HT-MEK data format, but can be used with any data format that is compatible with the `pandas` package.
+This is a Python interface for processing HT-MEK data. It is written in Python and uses `ipywidgets` elements to provide an interactive interface in a compatible environment (e.g. Jupyter, IDE renderer). The interface is designed to be used with the HT-MEK tabular data format but can be amended in the first section of the `ipynb` pipeline.
 
 Usage
 -----
