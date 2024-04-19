@@ -1,5 +1,5 @@
 # HTMEK-workup
-HTMEK-workup provides an interactive interface written in Python to work up kinetic data from HT-MEK experiments. Filtering criteria and kinetic fitting methodology are based on [Markin, Mokhtari, et al. 2020]([url](https://www.science.org/doi/10.1126/science.abf8761))
+HTMEK-workup provides an interactive interface written in Python to work up kinetic data from HT-MEK experiments. Filtering criteria and kinetic fitting methodology are based on [Markin, Mokhtari, et al. 2020](https://www.science.org/doi/10.1126/science.abf8761)
 
 Summary
 -------
