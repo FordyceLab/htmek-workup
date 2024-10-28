@@ -121,7 +121,7 @@ def format_data(standard_data, kinetic_data, egfp_data, substrate=None):
 
 
 # Squeeze kinetics dataframe to serialize timepoints
-def squeeze_kinetics(kinetic_data, additional_columns=None):
+def squeeze_kinetics(kinetic_data, additional_columns=None, additional_squeeze_columns=None):
     """Squeeze kinetics dataframe to serialize timepoints
 
     Parameters
@@ -136,7 +136,7 @@ def squeeze_kinetics(kinetic_data, additional_columns=None):
     """
 
     # squeeze kinetics dataframe to serialize timepoints
-    columns = ['x', 'y', 'Indices', 'MutantID', 'substrate', 'substrate_conc_uM', 'summed_button_BGsub_Button_Quant'] 
+    columns = ['x', 'y', 'Indices', 'MutantID', 'substrate', 'substrate_conc_uM', 'summed_button_BGsub_Button_Quant']
 
     # add additional columns if additional_columns is not None
     if additional_columns is not None:
@@ -145,13 +145,20 @@ def squeeze_kinetics(kinetic_data, additional_columns=None):
     kinetic_median_intensities = kinetic_data.groupby(columns)['median_chamber'].apply(list).reset_index(name='kinetic_median_intensities')
     times = kinetic_data.groupby(columns)['time_s'].apply(list).reset_index(name='time_s')
     squeeze_kinetics = pd.merge(times, kinetic_median_intensities, on=columns)
+    
+    if additional_squeeze_columns is not None:
+        for key, value in additional_squeeze_columns.items():
+
+            additional_squeeze_data = kinetic_data.groupby(columns)[key].apply(list).reset_index(name=value)
+            squeeze_kinetics = pd.merge(additional_squeeze_data, squeeze_kinetics, on=columns)
+
 
     # sort by timepoint
     squeeze_kinetics['kinetic_median_intensities'] = squeeze_kinetics.apply(lambda row: np.array(row['kinetic_median_intensities'])[np.argsort(row['time_s'])].tolist(), axis=1)
     squeeze_kinetics['time_s'] = squeeze_kinetics.apply(lambda row: np.array(row['time_s'])[np.argsort(row['time_s'])].tolist(), axis=1)
-
-    # Print out the first two rows of the dataframe
-    display(squeeze_kinetics.head(2))
+    if additional_squeeze_columns is not None:
+        for key, value in additional_squeeze_columns.items():
+            squeeze_kinetics[value] = squeeze_kinetics.apply(lambda row: np.array(row[value])[np.argsort(row['time_s'])].tolist(), axis=1)
 
     return squeeze_kinetics
 
@@ -460,12 +467,11 @@ def merge_and_get_product_concs(squeeze_kinetics, squeeze_standards, standard_ty
         # extrapolations of product concs
         try:
             # create lookup dictionary from xdata range
-            int_xdata = np.linspace(start=-np.mean(xdata), stop=np.max(xdata), num=2000, endpoint=False)
+            int_xdata = np.linspace(start=-np.mean(xdata), stop=np.max(xdata), num=3000, endpoint=False)
             d = dict(zip(v_func(int_xdata, *df.standard_popt), int_xdata))
 
             # estimate product concentration from lookup dictionary, using the lookup key closest to the median intensity
             product_concs = [ d.get(i, d[min(d.keys(), key=lambda k: abs(k - i))]) for i in df.kinetic_median_intensities]
-
 
             return product_concs
 
@@ -515,8 +521,8 @@ def imagearray_to_bytearr(img_arr, format = 'png'):
     """Convert image to a byte array
     """
     rescaled_image = np.interp(x = img_arr, 
-                               xp = (img_arr.min(), img_arr.max()), 
-                               fp = (0, img_arr.max()*100) # 10**6 is the maximum value that can be displayed in the widget; in general, increasing this number will increase the brightness of the image
+                               xp = (img_arr.min(), img_arr.max()), # xp is the range of the image array
+                               fp = (0, img_arr.max()*30) # 10**6 is the maximum value that can be displayed in the widget; in general, increasing this number will increase the brightness of the image
                                ).astype(np.uint32)
     img_byte_buffer = io.BytesIO()
     pil_img = Image.fromarray(rescaled_image)
@@ -757,7 +763,7 @@ def exponential(t, A, k, y0):
 v_exponential = np.vectorize(exponential)
 
 # fit first order exponential 
-def fit_first_order_exponential_row(row, pbp_conc=None):
+def fit_first_order_exponential_row(row, nfev_exp, pbp_conc=None):
     """Fit first order exponential to data from current row
     """
     try:
@@ -770,7 +776,7 @@ def fit_first_order_exponential_row(row, pbp_conc=None):
             ydata = [ ydata[i] for i in range(len(ydata)) if ydata[i] < 0.8 * pbp_conc ]
 
         # perform fit with max nfev of 1000 iterations
-        popt, pcov = optimize.curve_fit(exponential, xdata, ydata, bounds=([0, 0, -20], [np.inf, 0.05, 75]), max_nfev=10) # A, k, y0
+        popt, pcov = optimize.curve_fit(exponential, xdata, ydata, bounds=([0, 0, -20], [np.inf, 0.05, 75]), max_nfev=nfev_exp) # A, k, y0
 
         # get R^2 of fit
         Rsq = np.corrcoef(ydata, v_exponential(xdata, *popt))[0,1]**2
@@ -793,7 +799,7 @@ def fit_first_order_exponential_row(row, pbp_conc=None):
 
     return popt, Rsq, kobs_kcat_KM
 
-# define the least-squares algorithm for pbp coupled reactions
+# define the initial rate determination algorithm for pbp coupled reactions
 def fit_initial_rate_row_pbp(row, pbp_conc):
     try:
         substrate_conc = row.substrate_conc_uM
@@ -804,52 +810,33 @@ def fit_initial_rate_row_pbp(row, pbp_conc):
         # "regime 1": the substrate concentration is less than the concentration of PBP.
         if substrate_conc < pbp_conc: # "regime 1"
             regime = 1
-            # do incremental R2 fitting
-            for i in range(1, len(x)):
 
-                m, c = scp.stats.linregress(x[0:i+1], y[0:i+1])[0:2]
+            # if less than or equal to 30% of substrate has turned before aqusition of second point,
+            # fit the first 30% of the data
+            # if y[1] < 0.3*substrate_conc:
+            x = x[0:first_third]
+            y = y[0:first_third]
 
-                if i != 0:
-
-                    R2 = np.corrcoef(x=np.array(y[0:i+1]), y=m*np.array(x[0:i+1]) + c)[0,1]**2 
-                    # print(R2)
-                    
-                    # if R2 is lower than 0.9, exit loop
-                    if R2 < 0.999:
-                        break
-                
-            # now take x and y through the ith point
-            x = x[0:i+1]
-            y = y[0:i+1]
+            # else, fit the first two points
+            # else:
+            #     x = x[0:1]
+            #     y = y[0:1]
 
         # "regime 2": 30% of the substrate concentration is greater than 2/3 the concentration of PBP.
         elif 0.3*substrate_conc > (1/3)*pbp_conc: # regime "2"
             regime = 2
-            # do the incremental R2 fitting
-            for i in range(1, len(x)):
 
-                # fit the first i points
-                m, c = scp.stats.linregress(x[0:i+1], y[0:i+1])[0:2]
-                
-                # calculate R2
-                if i != 0:
-   
-                    R2 = np.corrcoef(x=np.array(y[0:i+1]), y=m*np.array(x[0:i+1]) + c)[0,1]**2 
-                    # print(R2)
-                    
-                    # if R2 is lower than 0.9, exit loop
-                    if R2 < 0.999:
-                        break
-            
-            # now take x and y through the ith point
-            x = x[0:i+1]
-            y = y[0:i+1]
+            # fit points within the linear regime of the standard curve, i.e. 2/3 of the PBP concentration
+            x = [ x[i] for i in range(len(x)) if y[i] < (1/3)*pbp_conc ]
+            y = [ y[i] for i in range(len(y)) if y[i] < (1/3)*pbp_conc ]
 
         # "regime 3": 30% of the substrate concentration is below 2/3 the concentration of PBP. 
         elif 0.3*substrate_conc < (2/3)*pbp_conc: # regime "3"
             regime = 3
-            x = x[0:first_third]
-            y = y[0:first_third]
+
+            # fit all points in which the product concentration is less than 30% of the total substrate concentration
+            x = [ x[i] for i in range(len(x)) if y[i] < 0.3*substrate_conc ]
+            y = [ y[i] for i in range(len(y)) if y[i] < 0.3*substrate_conc ]
 
 
         # exclude points where product concentration is greater than 80% of the PBP concentration
@@ -883,29 +870,21 @@ def fit_initial_rate_row_linear(row):
         x, y = row.time_s, row.kinetic_product_concentration_uM
         num_points_fit_vo = len(x)
 
-        # use incrememntal R2 fit to select initial rate points
-        for i in range(1, len(x)):
-                m, c = scp.stats.linregress(x[0:i+1], y[0:i+1])[0:2]
-
-                if i != 0:
-                    # calculate R2
-                    R2 = np.corrcoef(x=np.array(y[0:i+1]), y=m*np.array(x[0:i+1]) + c)[0,1]**2 
-
-                    # add to number of points fit
-                    num_points_fit_vo += 1
-                    
-                    # if R2 is lower than cutoff, exit loop
-                    if R2 < 0.9:
-
-                        # subtract one from number of points fit
-                        num_points_fit_vo -= 1
-
-                        break
+        # fit only first 30% of the data
+        first_third = int(len(x)*0.3)
+        half = int(len(x)*0.5)
+        x = x[0:half]
+        y = y[0:half]
+        # x = x[0:first_third]
+        # y = y[0:first_third]
+        num_points_fit_vo = len(x)
         
-        # if all points are fit, refit with first few points
-        if num_points_fit_vo == len(x):
-            m, c = scp.stats.linregress(x[0:3], y[0:3])[0:2]
-            num_points_fit_vo = 3
+        # # if all points are fit, refit with first few points
+        # if num_points_fit_vo == len(x):
+        #     m, c = scp.stats.linregress(x[0:3], y[0:3])[0:2]
+        #     num_points_fit_vo = 3
+
+        m, c = scp.stats.linregress(x, y)[0:2]
 
         # two point fit, regime, and number of points fit
         two_point = False
@@ -916,7 +895,7 @@ def fit_initial_rate_row_linear(row):
         return np.nan, np.nan, np.nan, np.nan, np.nan
         
 # Get initial rates
-def get_initial_rates(sq_merged, fit_type, pbp_conc):
+def get_initial_rates(sq_merged, fit_type, pbp_conc, nfev_exp):
     """Apply initial rate fitting algorithm to dataframe
     Parameters:
     - sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers.
@@ -945,7 +924,7 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc):
     print('2) Fitting exponential parameters...')
     # use tqdm to display progress bar
     for index, row in tqdm(sq_merged.iterrows(), total=sq_merged.shape[0]):
-        row_results = fit_first_order_exponential_row(row, pbp_conc=pbp_conc)
+        row_results = fit_first_order_exponential_row(row, nfev_exp, pbp_conc=pbp_conc)
         sq_merged.at[index, 'exponential_A'] = row_results[0][0]
         sq_merged.at[index, 'exponential_kobs'] = row_results[0][1]
         sq_merged.at[index, 'exponential_y0'] = row_results[0][2]
@@ -958,10 +937,11 @@ def get_initial_rates(sq_merged, fit_type, pbp_conc):
     return sq_merged
 
 # Plot progress curves
-def plot_sample_progress_curves(sq_merged, target_MutantID=None, target_chamber=None):
+def plot_sample_progress_curves(sq_merged, pbp_conc=None, target_MutantID=None, target_chamber=None):
     """Plot progress curves for a random library member
     Arguments:
     - sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers.
+    - pbp_conc (int): Concentration of PBP in uM.
     - target_MutantID (str): Mutant ID to plot progress curves for (e.g. 'hsapiens2_wt')
     - target_chamber (int): Chamber index to plot progress curves for (e.g. '01,11')
     Returns:
@@ -1010,6 +990,11 @@ def plot_sample_progress_curves(sq_merged, target_MutantID=None, target_chamber=
     selected_chambers = list(set(my_df['Indices']))
     color_d = dict(zip(selected_chambers, plt.cm.tab20.colors))
 
+    # get all product concs for the selected chambers
+    all_product_concs = my_df['kinetic_product_concentration_uM'].tolist()
+    all_product_concs = [item for sublist in all_product_concs for item in sublist]
+    # display(all_product_concs)
+
     #### Plot progress curves ####
     # loop through the concentrations
     for k,v in conc_d.items():
@@ -1038,14 +1023,12 @@ def plot_sample_progress_curves(sq_merged, target_MutantID=None, target_chamber=
                 axs[0,k].scatter(times[num_points_fit_vo:], product_concs[num_points_fit_vo:], s=10, marker='x', color=color) # subset the data to num_points_fit_vo and plot as x's
                 axs[0,k].plot([0, max(times)], [b, m*max(times)+b], '--', color=color) # plot the linear fit
                 axs[0,k].set_title(str(v) + 'uM\n' , loc='left')
-                axs[0,k].set_xlim(0, 2000)
-                axs[0,k].set_ylim(top=1.1*max(product_concs))
+                axs[0,k].set_ylim(bottom=0, top=1.1*max(all_product_concs))
 
                 # plot progress curves with exponential fit
                 axs[1,k].scatter(times, product_concs, s=10, label=indices, color=color)
                 axs[1,k].plot(times, v_exponential(times, A, k_obs, y0), '--', color=color)
-                axs[1,k].set_xlim(0, 2000)
-                axs[1,k].set_ylim(top=1.1*max(product_concs))
+                axs[1,k].set_ylim(bottom=0, top=1.1*max(all_product_concs))
                 axs[1,k].set_xlabel('Time (s)')
 
             except:
@@ -1065,14 +1048,12 @@ def plot_sample_progress_curves(sq_merged, target_MutantID=None, target_chamber=
                 # plot progress curves with linear fit
                 axs[0,k].scatter(times, product_concs, s=10, label=indices, color=color) # subset the data to num_points_fit_vo and plot as o's
                 axs[0,k].set_title(str(v) + 'uM\n' + substrate, loc='left')
-                axs[0,k].set_xlim(0, 2000)
-                axs[0,k].set_ylim(top=1.1*max(product_concs))
+                axs[0,k].set_ylim(bottom=0, top=1.1*max(all_product_concs))
 
                 # plot progress curves with exponential fit
                 axs[1,k].scatter(times, product_concs, s=10, label=indices, color=color)
                 axs[1,k].plot(times, v_exponential(times, A, k_obs, y0), '--', color=color)
-                axs[1,k].set_xlim(0, 2000)
-                axs[1,k].set_ylim(top=1.1*max(product_concs))
+                axs[1,k].set_ylim(bottom=0, top=1.1*max(all_product_concs))
                 axs[1,k].set_xlabel('Time (s)')
 
         
@@ -1121,7 +1102,7 @@ v_mm_func = np.vectorize(mm_func)
 
 
 # fit michaelis-menten equation to the initial rates
-def fit_michaelis_menten(sq_merged, exclude_concs=[]):
+def fit_michaelis_menten(sq_merged, exclude_concs=[], local_bg_ratio_threshold=2):
     """Fits the Michaelis-Menten equation to the initial rates of the progress curves.
     Parameters:
     - sq_merged (pandas dataframe): Contains kinetic and standard data for all chambers, 
@@ -1150,6 +1131,8 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
     exponential_R2 = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['exponential_R2'].apply(list).reset_index(name='exponential_R2')
     exponential_kcat_over_km = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['kobs_kcat_KM'].apply(list).reset_index(name='exponential_kcat_over_km')
     substrate_concs = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['substrate_conc_uM'].apply(list).reset_index(name='substrate_concs')
+    if 'local_bg_ratio_at_substrate_conc' in sq_merged.columns:
+        local_bg_ratios = sq_merged.groupby(['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])['local_bg_ratio_at_substrate_conc'].apply(list).reset_index(name='local_bg_ratios')
 
     # merge all of the series into one dataframe
     squeeze_mm = pd.merge(substrate_concs, initial_rates, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
@@ -1159,6 +1142,8 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
     squeeze_mm = pd.merge(squeeze_mm, exponential_y0, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
     squeeze_mm = pd.merge(squeeze_mm, exponential_R2, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
     squeeze_mm = pd.merge(squeeze_mm, exponential_kcat_over_km, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
+    if 'local_bg_ratio_at_substrate_conc' in sq_merged.columns:
+        squeeze_mm = pd.merge(squeeze_mm, local_bg_ratios, on=['x', 'y', 'Indices', 'MutantID', 'substrate', 'EnzymeConc', 'egfp_manual_flag'])
 
     # get the substrate concentration list from the first row
     all_substrate_concs = squeeze_mm['substrate_concs'].iloc[0]
@@ -1192,6 +1177,7 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
         ydata = df.initial_rates
         enzyme_conc = df.EnzymeConc
         num_points_fit_vo = df.num_points_fit_vo
+        local_bg_ratios = df.local_bg_ratios
 
         # create list of substrate concentrations to exclude from fit in this chamber
         # note: cannot overwrite exclude_concs variable because it is a global variable!
@@ -1202,12 +1188,12 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
         ydata_final = copy.copy(ydata)
         xdata_final = copy.copy(xdata)
 
-
-        # # exclude substrate concentrations from fit if the initial rate only used two points
-        # for i, num_points in enumerate(num_points_fit_vo):
-        #     if num_points == 2:
-        #         # append to list of substrate concentrations to exclude
-        #         chamber_exclude_concs.append(xdata_final[i])
+        # # exclude substrate concentrations from fit if the local_bg_ratio is below threshold
+        # if 'local_bg_ratio_at_substrate_conc' in sq_merged.columns:
+        #     for i, ratio in enumerate(local_bg_ratios):
+        #         if ratio < local_bg_ratio_threshold:
+        #             # append to list of substrate concentrations to exclude
+        #             chamber_exclude_concs.append(xdata_final[i])
 
         # exclude substrate concentrations from fit if the initial rate is negative
         for i, rate in enumerate(ydata_final):
@@ -1223,7 +1209,20 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
                     # append to list of substrate concentrations to exclude
                     chamber_exclude_concs.append(xdata_final[i])
 
-        # exclude substrate concentrations from fit
+        # # exclude substrate concentrations from fit if the initial rate is approximately non-increasing
+        # for i, rate in enumerate(ydata_final):
+        #     if i != 0:
+        #         if rate < ydata_final[i-1]*0.9:
+        #             # append to list of substrate concentrations to exclude
+        #             chamber_exclude_concs.append(xdata_final[i])
+                
+        #         # # for rates that remain low after dropping, exclude them
+        #         # if rate < 
+
+
+
+
+        # now remove excluded substrate concentrations from the fit
         chamber_exclude_concs = list(set(chamber_exclude_concs)) # remove duplicates
         if chamber_exclude_concs != None:
             for conc in chamber_exclude_concs:
@@ -1373,7 +1372,7 @@ def fit_michaelis_menten(sq_merged, exclude_concs=[]):
     plt.tight_layout()
 
     # create column for number of points to fit for each chamber
-    squeeze_mm['MM_points_to_fit'] = squeeze_mm.apply(lambda row: len(row.initial_rates) - len(row.exclude_concs), axis=1)
+    squeeze_mm['MM_points_to_fit'] = squeeze_mm.apply(lambda row: (len(row.initial_rates) - len(ast.literal_eval(row.exclude_concs))), axis=1)
 
     ####################################
     # REFORMAT EXPONENTIAL FIT COLUMNS #
@@ -1493,10 +1492,10 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
                 lbg_rate = 0.01
             lbg_ratio = chamber_rate/lbg_rate
 
-            # if rates are near-zero, set ratio to 0.
-            # this prevents infinite ratios
-            if chamber_rate < 0.001:
-                lbg_ratio = 0
+            # # if rates are near-zero, set ratio to 0.
+            # # this prevents infinite ratios
+            # if chamber_rate < 0.001:
+            #     lbg_ratio = 0
 
             # account for negative ratios
             if lbg_ratio < 0:
@@ -1512,7 +1511,7 @@ def calculate_local_bg_ratio(squeeze_mm, sq_merged, target_substrate_conc, devic
     
     # remove local_bg_ratio column if it already exists
     for col in squeeze_mm: 
-        if 'local_bg_ratio' in col:
+        if col == 'local_bg_ratio':
             # drop column if it already exists
             squeeze_mm = squeeze_mm.drop(columns=['local_bg_ratio'])
     
@@ -1623,9 +1622,10 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
     # initialize list for all product concentrations
     all_product_concs = []
 
-
+    # iterate through each substrate conentration
     for index, row in conc_df.iterrows():
 
+        # get times and product concentrations
         times, product_concs = np.array(row['time_s']), row['kinetic_product_concentration_uM']
         all_product_concs.append(product_concs)
 
@@ -1636,7 +1636,9 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
         two_point_fit = row['two_point_fit']
 
         # get exponential fit parameters
-        A, k_obs, y0 = row.exponential_A, row.exponential_kobs, row.exponential_y0
+        A = row.exponential_A
+        k_obs = row.exponential_kobs
+        y0 = row.exponential_y0
         kobs_kcat_over_KM = row.kobs_kcat_KM
         exp_R2 = row.exponential_R2
         
@@ -1664,23 +1666,38 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
             # add text for fit descriptors
             if fit_descriptors==True:
 
+                # set descriptor font size, spacing and starting y position
+                descriptor_fontsize = 7
+
+                # get number of substrate concs in experiment
+                num_concs = len(df['substrate_conc_uM'].unique())
+                
+                # if 
+                if num_concs > 5:
+                    descriptor_y = -0.45
+                    descriptor_vspacing = 0.15
+                else:
+                    descriptor_y = -0.35
+                    descriptor_vspacing = 0.1
+
                 # add linear title with underlined text
-                ax.text(0, -0.35, "Lin Fit Regime: " + str(regime), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                ax.text(0, descriptor_y, "Lin Fit Regime: " + str(regime), transform=ax.transAxes, fontsize=descriptor_fontsize)
 
                 # add two-point fit
                 if two_point_fit == True:
-                    ax.text(0, -0.5, "Two-point: " + str(two_point_fit), color='red', transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                    ax.text(0, descriptor_y-descriptor_vspacing*1, "Two-point: " + str(two_point_fit), color='red', transform=ax.transAxes, fontsize=descriptor_fontsize)
                 else:
-                    ax.text(0, -0.5, "Two-point: " + str(two_point_fit), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                    ax.text(0, descriptor_y-descriptor_vspacing*1, "Two-point: " + str(two_point_fit), transform=ax.transAxes, fontsize=descriptor_fontsize)
             
                 # add initial rate text
-                ax.text(0, -0.65, "$V_i$: " + str(round(vi, 5)), transform=ax.transAxes) # Here, transAxes applies a transform to the axes to ensure that spacing isn't off between plots
+                ax.text(0, descriptor_y-descriptor_vspacing*2, "$v_i$: " + str(round(vi, 5)), transform=ax.transAxes, fontsize=descriptor_fontsize)
 
                 # add exponential fit text
-                ax.text(0, -0.8, "$k_{obs}$: " + str(round(k_obs, 2)), transform=ax.transAxes)
-                ax.text(0, -0.95, "$A$: " + str(round(A, 2)), transform=ax.transAxes)
-                ax.text(0, -1.1, "$R^2$: " + str(round(exp_R2, 3)), transform=ax.transAxes)
-                ax.text(0, -1.25, "$kcat/KM$: " + str(round(kobs_kcat_over_KM, 2)), transform=ax.transAxes)
+                ax.text(0, descriptor_y-descriptor_vspacing*3, "$k_{obs}$: " + str(round(k_obs, 3)), transform=ax.transAxes, fontsize=descriptor_fontsize)
+                ax.text(0, descriptor_y-descriptor_vspacing*4, "$A$: " + str(round(A, 3)), transform=ax.transAxes, fontsize=descriptor_fontsize)
+                ax.text(0, descriptor_y-descriptor_vspacing*5, "$R^2$: " + str(round(exp_R2, 3)), transform=ax.transAxes, fontsize=descriptor_fontsize)
+                # show kcat/KM in scientific notation
+                ax.text(0, descriptor_y-descriptor_vspacing*6, "Exp $kcat/KM$: " + str('{:.2e}'.format(kobs_kcat_over_KM)), transform=ax.transAxes, fontsize=descriptor_fontsize)
 
             # add title
             title_string = str(conc) + ' uM ' + substrate_name
@@ -1691,11 +1708,8 @@ def plot_progress_curve(df, conc, ax, kwargs_for_scatter, kwargs_for_line, pbp_c
                 title_string = title_string[0] + 'uM\n' + title_string[1]
             ax.set_title(title_string)
             ax.set_box_aspect(1)
-    # # flatten list of all product concentrations
-    # all_product_concs = [item for sublist in all_product_concs for item in sublist]
 
-    # # now set ylims for each ax 
-    # ax.set_ylim(min(all_product_concs), max(all_product_concs)*1.1)
+
 
 # plot heatmap in PDF output file
 def heatmap(data, ax=None, norm=None,
@@ -1757,8 +1771,8 @@ def heatmap(data, ax=None, norm=None,
 # ==========================================================================================
 
 # main function to plot progress curves, heatmap, and chamber descriptors for experiment
-def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, filter_dictionary, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, 
-                      experimental_day, experiment_name, substrate, pbp_conc=None, starting_chamber=None, exclude_concs=[]):
+def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, filter_dictionary, exclude_2point_MM, squeeze_kinetics, button_stamps, device_columns, device_rows, export_path_root, 
+                      experimental_day, experiment_name, substrate, pbp_conc=None, starting_chamber=None, exclude_concs=[], MM_fit_r2_threshold=0.9):
 
     # create export directory
     newpath = export_path_root + '/PDF/pages/'
@@ -1770,9 +1784,13 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
     # initialize figure
     fig = plt.figure(figsize=(15, 10)) # size of print area of A4 page is 7 by 9.5
 
+    # get today's date as MMM DD, YYYY
+    from datetime import datetime
+    today = datetime.today().strftime('%b %d, %Y')
+
     # increase the spacing between the subplots
     fig.subplots_adjust(wspace=1.5, hspace=1)
-    fig.suptitle(' '.join([experimental_day, experiment_name, substrate, 'Summary']))
+    fig.suptitle(' '.join([experimental_day, experiment_name, substrate, 'Summary']) + '\nGenerated on ' + today, fontsize=16, y=1)
 
     ## defining subplots ============================================================
     ax_conc_heatmap = plt.subplot2grid((5, 8), (0, 0), rowspan=2, colspan=2) # enzyme concentration heatmap
@@ -1784,11 +1802,15 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
     ax_replicate_scatter_MM_kcatKM = plt.subplot2grid((5, 8), (3, 4), rowspan=2, colspan=2) # replicate scatter of kcat/KM
     ax_replicate_scatter_exp_kcatKM = plt.subplot2grid((5, 8), (3, 6), rowspan=2, colspan=2) # replicate scatter of kcat/KM from kobs fit
 
-    ## Heatmap plotting ============================================================
+
+    ############################################
+    ########### Heatmap plotting ###############
+    ############################################
+
     # fill NaN
     grid = squeeze_mm.fillna(0)
 
-    # plot enz conc
+    # plot enzyme concentration heatmap ============================================================
     grid_EC = grid.pivot(columns='x', index='y', values='EnzymeConc')
     grid_EC = grid_EC[grid_EC.columns[::-1]] # flip horizontally
     grid_EC = np.array(grid_EC)
@@ -1805,7 +1827,7 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
     ax_conc_heatmap.set_yticks([])
     ax_conc_heatmap.set_title('Enzyme Concentration \n by chamber')
 
-    # plot enz LBG (shrink large values to 6)
+    # plot enz LBG (shrink large values to 6) ============================================================
     max_lbg = 4
     grid_lbg = grid.pivot(columns='x', index='y', values='local_bg_ratio')
     grid_lbg = grid_lbg[grid_lbg.columns[::-1]] # flip horizontally
@@ -1848,7 +1870,9 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
     ax_egfp_hist.set_title('eGFP concentration \n in blank chambers')
 
 
-    ## Filter Table plotting ============================================================
+    ############################################
+    ######### Filter Table plotting ############
+    ############################################
     # create filter table, including a label for each filter
     filter_table = pd.DataFrame.from_dict(filter_dictionary, orient='index', columns=['Value'])
     filter_table['Filter'] = filter_table.index
@@ -1862,13 +1886,20 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
     ax_filter_table.table(cellText=filter_table.values, colLabels=filter_table.columns, loc='center')
 
 
-    ## Plot replicate scatter plots ============================================================
+    ############################################
+    ######## Replicate Scatter Plots ###########
+    ############################################
     # Filter out blanks, low Enz, low local background ratio, and egfp flag
     sq_merged_filtered = squeeze_mm[(squeeze_mm['MutantID'] != 'BLANK') 
                                      & (squeeze_mm['EnzymeConc'] > filter_dictionary['EnzymeConc'])
                                      & (squeeze_mm['local_bg_ratio'] > filter_dictionary['local_bg_ratio'])
-                                    #  & (squeeze_mm['MM_points_to_fit'] >= 2)
+                                     & (squeeze_mm['egfp_manual_flag'] == 0)
+                                     & (squeeze_mm['MM_kcat_over_KM_fit_R2'] > MM_fit_r2_threshold)
                                      ]
+    
+    # remove MM fits with less than 3 points if filter is set to True
+    if exclude_2point_MM == True:
+        sq_merged_filtered = sq_merged_filtered[(squeeze_mm['MM_points_to_fit'] > 2)]
     
     # # only keep the two replicates from each MutantID with the highest MM_kcat_over_KM_fit_R2
     # sq_merged_filtered = sq_merged_filtered.sort_values(by=['MM_kcat_over_KM_fit_R2'], ascending=False)
@@ -1905,17 +1936,7 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
         pivot_df_MM_kcatKM.columns = ['MutantID', 'indices_1', 'indices_2', 'replicate_1', 'replicate_2']
         pivot_df_exp_kcatKM.columns = ['MutantID', 'indices_1', 'indices_2', 'replicate_1', 'replicate_2']
 
-        ## Scatter plotting ============================================================
-        # kcat
-        ax_replicate_scatter_MM_kcat.scatter(pivot_df_kcat['replicate_1'], pivot_df_kcat['replicate_2'], color='blue', label='Replicate 1 vs. Replicate 2')
-        ax_replicate_scatter_MM_kcat.plot([pivot_df_kcat['replicate_1'].min(), pivot_df_kcat['replicate_1'].max()], [pivot_df_kcat['replicate_1'].min(), pivot_df_kcat['replicate_1'].max()], color='red', linestyle='--', label='y=x')
-        ax_replicate_scatter_MM_kcat.set_xlabel('Replicate 1 ($s^{-1}$)')
-        ax_replicate_scatter_MM_kcat.set_ylabel('Replicate 2 ($s^{-1}$)')
-        ax_replicate_scatter_MM_kcat.set_title('$k_{cat}$ Replicates')
-        ax_replicate_scatter_MM_kcat.set_xscale('log')
-        ax_replicate_scatter_MM_kcat.set_yscale('log')
-    
-        # KM 
+        # KM ============================================================
         ax_replicate_scatter_MM_KM.scatter(pivot_df_KM['replicate_1'], pivot_df_KM['replicate_2'], color='blue', label='Replicate 1 vs. Replicate 2')
         ax_replicate_scatter_MM_KM.plot([pivot_df_KM['replicate_1'].min(), pivot_df_KM['replicate_1'].max()], [pivot_df_KM['replicate_1'].min(), pivot_df_KM['replicate_1'].max()], color='red', linestyle='--', label='y=x')
         ax_replicate_scatter_MM_KM.set_xlabel('Replicate 1 ($uM$)')
@@ -1924,8 +1945,48 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
         ax_replicate_scatter_MM_KM.set_xscale('log')
         ax_replicate_scatter_MM_KM.set_yscale('log')
 
-        # Michaelis-Menten kcat/KM 
-        distance_max = 0.55
+        # kcat ============================================================
+        distance_max = 0.8
+        ax_replicate_scatter_MM_kcat.scatter(pivot_df_kcat['replicate_1'], pivot_df_kcat['replicate_2'], color='blue', label='Replicate 1 vs. Replicate 2')
+        ax_replicate_scatter_MM_kcat.plot([pivot_df_kcat['replicate_1'].min(), pivot_df_kcat['replicate_1'].max()], [pivot_df_kcat['replicate_1'].min(), pivot_df_kcat['replicate_1'].max()], color='red', linestyle='--', label='y=x')
+        ax_replicate_scatter_MM_kcat.set_xlabel('Replicate 1 ($s^{-1}$)')
+        ax_replicate_scatter_MM_kcat.set_ylabel('Replicate 2 ($s^{-1}$)')
+        ax_replicate_scatter_MM_kcat.set_title('$k_{cat}$ Replicates')
+        ax_replicate_scatter_MM_kcat.set_xscale('log')
+        ax_replicate_scatter_MM_kcat.set_yscale('log')
+
+        # label outliers on this scatter plot
+        labels = []
+        texts = []
+        for index, row in pivot_df_kcat.iterrows():
+            x = row['replicate_1']
+            y = row['replicate_2']
+            mutant_id = '1:({})\n2:({})'.format(row['indices_1'], row['indices_2'])
+            distance = 1 - min(x,y)/max(x,y)
+            if distance > distance_max:
+                outlier_label = mutant_id
+                labels.append(outlier_label)
+                # Adjust initial text placement to be closer to the point
+                text = ax_replicate_scatter_MM_kcat.text(x, y, outlier_label, fontsize=8, ha='right', va='bottom')
+                texts.append(text)
+
+        if texts:
+            adjust_text(texts,
+                        arrowprops=dict(arrowstyle="->", color='gray', lw=1, shrinkA=5, shrinkB=5),  # Adjusted arrow length
+                        ax=ax_replicate_scatter_MM_kcat,
+                        force_points=0.2,  # Increased force
+                        force_text=0.2,  # Increased force
+                        expand_points=(1, 1),  # Increased area
+                        expand_text=(1, 1),  # Increased area
+                        autoalign='y',
+                        avoid_points=True,  # Avoid overlap with points
+                        add_objects=[ax_replicate_scatter_MM_kcat.get_lines()[0], # Include y=x line in avoidance  
+                                     ],  
+                        ) 
+    
+    
+        # Michaelis-Menten kcat/KM ============================================================
+        distance_max = 0.8
         ax_replicate_scatter_MM_kcatKM.scatter(pivot_df_MM_kcatKM['replicate_1'], pivot_df_MM_kcatKM['replicate_2'], color='blue', label='Replicate 1 vs. Replicate 2')
         ax_replicate_scatter_MM_kcatKM.plot([pivot_df_MM_kcatKM['replicate_1'].min(), pivot_df_MM_kcatKM['replicate_1'].max()], [pivot_df_MM_kcatKM['replicate_1'].min(), pivot_df_MM_kcatKM['replicate_1'].max()], color='red', linestyle='--', label='y=x')
         ax_replicate_scatter_MM_kcatKM.set_xlabel('Replicate 1 ($M^{-1}s^{-1}$)')
@@ -1934,69 +1995,85 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
         ax_replicate_scatter_MM_kcatKM.set_xscale('log')
         ax_replicate_scatter_MM_kcatKM.set_yscale('log')
 
-        ## Label outliers ============================================================
         # label outliers on this scatter plot
         labels = []
         texts = []
         for index, row in pivot_df_MM_kcatKM.iterrows():
-            # get x and y values
             x = row['replicate_1']
             y = row['replicate_2']
-
-            # get mutant id
-            # print(pivot_df_MM_kcatKM.columns)
             mutant_id = '1:({})\n2:({})'.format(row['indices_1'], row['indices_2'])
-
-            # get distance from y=x line
             distance = 1 - min(x,y)/max(x,y)
-
-            # if distance is greater than 100, label the point
             if distance > distance_max:
                 outlier_label = mutant_id
                 labels.append(outlier_label)
-                texts.append(ax_replicate_scatter_MM_kcatKM.text(x, y, outlier_label, fontsize=8))
-        if len(texts) > 0:
-            adjust_text(texts, arrowprops=dict(arrowstyle="-", color='k', lw=0.5), ax=ax_replicate_scatter_MM_kcatKM, 
-                        force_points=0.1, force_text=0.1, expand_points=(2, 2), expand_text=(1.2, 1.2))
+                # Improved initial text placement and alignment
+                text = ax_replicate_scatter_MM_kcatKM.text(x, y, outlier_label, fontsize=8, ha='right', va='top')
+                texts.append(text)
 
-        # Exponential kcat/KM
-        ax_replicate_scatter_exp_kcatKM.scatter(pivot_df_exp_kcatKM['replicate_1'], pivot_df_exp_kcatKM['replicate_2'], color='blue', label='Replicate 1 vs. Replicate 2')
-        ax_replicate_scatter_exp_kcatKM.plot([pivot_df_exp_kcatKM['replicate_1'].min(), pivot_df_exp_kcatKM['replicate_1'].max()], [pivot_df_exp_kcatKM['replicate_1'].min(), pivot_df_exp_kcatKM['replicate_1'].max()], color='red', linestyle='--', label='y=x')
-        ax_replicate_scatter_exp_kcatKM.set_xlabel('Replicate 1 ($M^{-1}s^{-1}$)')
-        ax_replicate_scatter_exp_kcatKM.set_ylabel('Replicate 2 ($M^{-1}s^{-1}$)')
-        ax_replicate_scatter_exp_kcatKM.set_title('Exponential $k_{cat}/K_M$ Replicates\nOutliers:>%s%%' % str(int(distance_max * 100)))
-        ax_replicate_scatter_exp_kcatKM.set_xscale('log')
-        ax_replicate_scatter_exp_kcatKM.set_yscale('log')
-        # label outliers on this scatter plot
-        labels = []
-        texts = []
-        for index, row in pivot_df_exp_kcatKM.iterrows():
-            # get x and y values
-            x = row['replicate_1']
-            y = row['replicate_2']
+        if texts:
+            adjust_text(texts,
+                        arrowprops=dict(arrowstyle="->", color='gray', lw=1, shrinkA=5, shrinkB=5),  # Adjusted arrow length
+                        ax=ax_replicate_scatter_MM_kcatKM,
+                        force_points=0.2,  # Increased force
+                        force_text=0.2,  # Increased force
+                        expand_points=(1, 1),  # Increased area
+                        expand_text=(1, 1),  # Increased area
+                        autoalign='y',
+                        avoid_points=True,  # Avoid overlap with points
+                        add_objects=[ax_replicate_scatter_MM_kcatKM.get_lines()[0]],  # Include y=x line in avoidance
+                        # only_move='y', # Restrict movement to y-axis if suitable
+                        ) 
 
-            # get mutant id
-            mutant_id = row['MutantID']
+        # # Exponential kcat/KM ============================================================
+        # ax_replicate_scatter_exp_kcatKM.scatter(pivot_df_exp_kcatKM['replicate_1'], pivot_df_exp_kcatKM['replicate_2'], color='blue', label='Replicate 1 vs. Replicate 2')
+        # ax_replicate_scatter_exp_kcatKM.plot([pivot_df_exp_kcatKM['replicate_1'].min(), pivot_df_exp_kcatKM['replicate_1'].max()], [pivot_df_exp_kcatKM['replicate_1'].min(), pivot_df_exp_kcatKM['replicate_1'].max()], color='red', linestyle='--', label='y=x')
+        # ax_replicate_scatter_exp_kcatKM.set_xlabel('Replicate 1 ($M^{-1}s^{-1}$)')
+        # ax_replicate_scatter_exp_kcatKM.set_ylabel('Replicate 2 ($M^{-1}s^{-1}$)')
+        # ax_replicate_scatter_exp_kcatKM.set_title('Exponential $k_{cat}/K_M$ Replicates\nOutliers:>%s%%' % str(int(distance_max * 100)))
+        # ax_replicate_scatter_exp_kcatKM.set_xscale('log')
+        # ax_replicate_scatter_exp_kcatKM.set_yscale('log')
+        
+        # # label outliers on this scatter plot
+        # labels = []
+        # texts = []
+        # for index, row in pivot_df_exp_kcatKM.iterrows():
+        #     # get x and y values
+        #     x = row['replicate_1']
+        #     y = row['replicate_2']
 
-            # get distance from y=x line
-            distance = 1 - min(x,y)/max(x,y)
+        #     # get mutant id
+        #     mutant_id = row['MutantID']
 
-            # if distance is greater than 100, label the point
-            if distance > distance_max:
-                outlier_label = mutant_id.split('_')[0]
-                labels.append(outlier_label)
-                texts.append(ax_replicate_scatter_exp_kcatKM.text(x, y, outlier_label, fontsize=8))
-        # adjust_text(texts, arrowprops=dict(arrowstyle="-", color='k', lw=0.5), ax=ax_replicate_scatter_exp_kcatKM, 
-        #             force_points=0.1, force_text=0.1, expand_points=(2, 2), expand_text=(1.2, 1.2))
+        #     # get distance from y=x line
+        #     distance = 1 - min(x,y)/max(x,y)
 
-    ## Save figure ============================================================
+        #     # if distance is greater than 100, label the point
+        #     if distance > distance_max:
+        #         outlier_label = mutant_id.split('_')[0]
+        #         labels.append(outlier_label)
+        #         texts.append(ax_replicate_scatter_exp_kcatKM.text(x, y, outlier_label, fontsize=8))
+        # # adjust_text(texts, arrowprops=dict(arrowstyle="-", color='k', lw=0.5), ax=ax_replicate_scatter_exp_kcatKM, 
+        # #             force_points=0.1, force_text=0.1, expand_points=(2, 2), expand_text=(1.2, 1.2))
+
+
+    ############################################
+    ############## Save figure #################
+    ############################################
 
     plt.savefig(newpath + '00_Chip_Summary.pdf')
     plt.show()
 
+    # close figure
+    plt.close()
+
     ## Initialize v_isothermal ============================================================
     def isotherm(P_i, A, KD, PS, I_0uMP_i): return 0.5 * A * (KD + P_i + PS - ((KD + PS + P_i)**2 - 4*PS*P_i)**(1/2)) + I_0uMP_i
     v_isotherm = np.vectorize(isotherm)
+
+
+    ############################################
+    ######### Chamber-wise plotting ############
+    ############################################
 
     # initialize starting chamber
     start_x = 1
@@ -2024,11 +2101,18 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                 # initialize figure
                 fig = plt.figure(figsize=(10, 12))
 
+                # if there are more than 4 substrate concs, decrease height spacing
+                if len(set(export_kinetic_df['substrate_conc_uM'])) > 4:
+                    pdf_grid_hspacing = 0
+                else:
+                    pdf_grid_hspacing = 0.75
+
                 # increase the spacing between the subplots
-                fig.subplots_adjust(wspace=0.5, hspace=0.7)
+                fig.subplots_adjust(wspace=0.5, hspace=pdf_grid_hspacing)
 
                 ## defining subplots ============================================================
                 ax_image = plt.subplot2grid((10, 12), (0, 0), colspan=2) # chamber image
+                ax_image.set_rasterization_zorder(0)
                 
                 # define concentration series
                 concs = set(export_kinetic_df['substrate_conc_uM'])
@@ -2037,20 +2121,27 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                 for n, conc in enumerate(sorted(concs)):
                     if n == 0:
                         globals()['ax_progress_curve_' + str(n)] = plt.subplot2grid((5, len(concs)), (1, n), colspan=1, rowspan=1) # progress curves
+                        globals()['ax_progress_curve_' + str(n)].set_rasterization_zorder(0)
                     else:
                         globals()['ax_progress_curve_' + str(n)] = plt.subplot2grid((5, len(concs)), (1, n), colspan=1, rowspan=1, sharey=ax_progress_curve_0) # progress curves
+                        globals()['ax_progress_curve_' + str(n)].set_rasterization_zorder(0)
 
                 # initialize progress curve zoom subplot2grid objects (in row below progress curves)
                 for n, conc in enumerate(sorted(concs)):
                     if n == 0:
                         globals()['ax_progress_curve_zoom_' + str(n)] = plt.subplot2grid((5, len(concs)), (2, n), colspan=1, rowspan=1)
+                        globals()['ax_progress_curve_zoom_' + str(n)].set_rasterization_zorder(0)
                     else:
                         globals()['ax_progress_curve_zoom_' + str(n)] = plt.subplot2grid((5, len(concs)), (2, n), colspan=1, rowspan=1, sharey=ax_progress_curve_zoom_0) 
+                        globals()['ax_progress_curve_zoom_' + str(n)].set_rasterization_zorder(0)
             
                 # define table, mm curve, and pbp std curve subplot2grid objects
                 ax_table = plt.subplot2grid((8, 10), (0, 3), colspan=5) # table
                 ax_mm_curve = plt.subplot2grid((8, 10), (6, 0), colspan=3, rowspan=3)
                 ax_std_curve = plt.subplot2grid((8, 10), (6, 7), colspan=3, rowspan=3)
+                ax_table.set_rasterization_zorder(0)
+                ax_mm_curve.set_rasterization_zorder(0)
+                ax_std_curve.set_rasterization_zorder(0)
 
 
                 ## image plotting ============================================================
@@ -2093,8 +2184,9 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                     ax_std_curve.set_title('Standard Curve')
                     ax_std_curve.legend(loc='lower right', shadow=True)
 
-
+                ############################################################################################################
                 ## Michaelis-Menten curve plotting ============================================================
+                ############################################################################################################
                 # if df is not empty, plot
                 if export_mm_df.empty == False:
                     xdata = export_mm_df.iloc[0].substrate_concs
@@ -2153,19 +2245,23 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                 local_background_df = pd.DataFrame([])
                 for i in local_background_indices:
                     data = sq_merged[sq_merged['Indices'] == f"{i[0]:02d}" + ',' + f"{i[1]:02d}"]
+                    
                     # add data to local_background_df
                     local_background_df = pd.concat([local_background_df, data])
 
-                # plot curves
+                ### plot first row of curves ###
                 for ax, conc in enumerate(sorted(concs)):
                     plot_progress_curve(export_kinetic_df, conc=conc, ax=globals()['ax_progress_curve_' + str(ax)] , fit_descriptors=False, kwargs_for_scatter={"s": 15, "c": 'blue'}, kwargs_for_line={"c": 'blue'}, pbp_conc=pbp_conc, substrate_name=substrate)
                     plot_progress_curve(local_background_df, conc=conc, ax=globals()['ax_progress_curve_' + str(ax)], kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'}, pbp_conc=pbp_conc, fit_descriptors=False, substrate_name=substrate)
 
                     # set ylabel on first (left-most) plot
                     if ax == 0:
-                        globals()['ax_progress_curve_' + str(ax)].set_ylabel('Product Conc (uM)')
+                        globals()['ax_progress_curve_' + str(ax)].set_ylabel('Product\nConc (uM)')
                     else:
                         plt.setp(globals()['ax_progress_curve_' + str(ax)].get_yticklabels(), visible=False)
+
+                    # set xlabels on all plots
+                    globals()['ax_progress_curve_' + str(ax)].set_xlabel('Time (s)')
                     
                 # set ylims
                 # get all product concentrations
@@ -2185,23 +2281,33 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                 for ax, conc in enumerate(sorted(concs)):
                     globals()['ax_progress_curve_' + str(ax)].set_ylim(min(all_product_concs), max(all_product_concs)*1.1)
 
-                ## add second row of progress curves, zoomed in
+                ### add second row of progress curves, zoomed in ###
+                # set max_x for zoomed in plots
+                max_x = 700 # seconds
+
                 # plot curves
                 for ax, conc in enumerate(sorted(concs)):
                     plot_progress_curve(export_kinetic_df, conc=conc, ax=globals()['ax_progress_curve_zoom_' + str(ax)] , fit_descriptors=True, kwargs_for_scatter={"s": 15, "c": 'blue'}, kwargs_for_line={"c": 'blue'}, pbp_conc=pbp_conc, substrate_name=substrate)
                     plot_progress_curve(local_background_df, conc=conc, ax=globals()['ax_progress_curve_zoom_' + str(ax)], kwargs_for_scatter={"s": 5, "c": 'red', 'alpha': 0.5}, kwargs_for_line={"c": 'red', 'alpha': 0.5, 'linestyle': 'dashed'}, pbp_conc=pbp_conc, fit_descriptors=False, substrate_name=substrate)
 
+                    # # set xlabels on all plots
+                    # globals()['ax_progress_curve_zoom_' + str(ax)].set_xlabel('Time (s)')
+
                     # set ylabel on first (left-most) plot
                     if ax == 0:
-                        globals()['ax_progress_curve_zoom_' + str(ax)].set_ylabel('Product Conc (uM)')
+                        globals()['ax_progress_curve_zoom_' + str(ax)].set_ylabel('Product\nConc (uM)')
                     else:
                         plt.setp(globals()['ax_progress_curve_zoom_' + str(ax)].get_yticklabels(), visible=False)
 
                     # remove title
-                    globals()['ax_progress_curve_zoom_' + str(ax)].set_title('')
+                    if ax == 0:
+                        globals()['ax_progress_curve_zoom_' + str(ax)].set_title('')
+                        globals()['ax_progress_curve_zoom_' + str(ax)].set_title('Zoomed at\n$t_{max}$ = %s s' % max_x, fontsize=8, loc='left')
+                    else:
+                        globals()['ax_progress_curve_zoom_' + str(ax)].set_title('')
+
 
                 # set xlim and ylim
-                max_x = 700 # seconds
                 for ax, conc in enumerate(sorted(concs)):
                     globals()['ax_progress_curve_zoom_' + str(ax)].set_xlim(-30, max_x)
 
@@ -2281,8 +2387,14 @@ def plot_chip_summary(squeeze_mm, standard_type, sq_merged, squeeze_standards, f
                 pbar.update(1)
                 pbar.set_description("Processing %s" % str((x, y)))
 
-                plt.savefig(newpath + str(Indices) + '.pdf')
-                plt.close('all')
+                # set facecolor to white
+                fig.patch.set_facecolor('white')
+
+                # save figure
+                fig.savefig(newpath + str(Indices) + '.pdf', dpi=200)
+
+                # close figure
+                plt.close(fig)
 
         pbar.set_description("Export complete")
 
@@ -2687,6 +2799,9 @@ def plot_chip_summary_inhibition(Inhibitor, standard_type, sq_merged, squeeze_st
                     globals()['ax_progress_curve_' + str(ax)].set_ylim(min(all_product_concs), max(all_product_concs)*1.1)
 
                 ## add second row of progress curves, zoomed in
+                # set max_x for zoomed in plot
+                max_x = 500 # seconds
+
                 # plot curves
                 for ax, conc in enumerate(sorted(concs)):
                     plot_progress_curve(export_kinetic_df, conc=conc, ax=globals()['ax_progress_curve_zoom_' + str(ax)] , fit_descriptors=True, kwargs_for_scatter={"s": 15, "c": 'blue'}, kwargs_for_line={"c": 'blue'}, pbp_conc=pbp_conc, substrate_name=substrate)
@@ -2699,16 +2814,17 @@ def plot_chip_summary_inhibition(Inhibitor, standard_type, sq_merged, squeeze_st
                         plt.setp(globals()['ax_progress_curve_zoom_' + str(ax)].get_yticklabels(), visible=False)
 
                     # remove title
-                    globals()['ax_progress_curve_zoom_' + str(ax)].set_title('')
+                    if ax == 0:
+                        globals()['ax_progress_curve_zoom_' + str(ax)].set_title('Zoomed at %s seconds' % max_x, fontsize=8, loc='left')
+                    else:
+                        globals()['ax_progress_curve_zoom_' + str(ax)].set_title('')
+
 
                 # set xlim and ylim
-                max_x = 500 # seconds
                 for ax, conc in enumerate(sorted(concs)):
                     globals()['ax_progress_curve_zoom_' + str(ax)].set_xlim(-30, max_x)
 
                 # set y upper limit to pbp_conc
-                # get index of closest timepoint to max_x from export_kinetic_df
-
                 time_list = export_kinetic_df['time_s'].iloc[0]
                 max_x_index = min(range(len(time_list)), key=lambda i: abs(time_list[i]-max_x))
 
@@ -2895,4 +3011,9 @@ def export_data(sq_merged, squeeze_mm, export_path_root, experimental_day, setup
     export_df['Experiment'] = experiment_name
 
     # export to csv
-    export_df.to_csv(export_path_root + '/' + experimental_day + '_' + substrate + '_workup.csv')
+    # export_df.to_csv(export_path_root + '/' + experimental_day + '_' + substrate + device + '_workup.csv')
+    export_df.to_csv(export_path_root + '/' + '_'.join([experimental_day, device, substrate]) + '_workup.csv')
+
+    # return filepath
+    # return export_path_root + '/' + experimental_day + '_' + substrate + '_workup.csv'
+    return export_path_root + '/' + '_'.join([experimental_day, device, substrate]) + '_workup.csv'
